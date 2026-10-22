@@ -32,13 +32,12 @@ jobs:
 
       - name: 🔍 Tesseract OCR & deutsche Sprachdaten installieren
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-deu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-deu
 
       - name: 📦 Python-Pakete installieren
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --no-cache-dir -r requirements.txt
 
       - name: 🚀 OCR ausführen & Speiseplan live zu Hetzner beamen
         env:
