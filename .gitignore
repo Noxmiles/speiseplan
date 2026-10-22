@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+
+# Sensible & lokale Konfigurationen
+.sftp_credentials
+sync_config.json
+.auto_check_state.json
+
+# Lokale Daten & Logs
+data/
+*.log
+
+# Server- & Testdateien (auf Hetzner bzw. lokal)
+php/
+tests/
+systemd/
+
+# Bild- & Paketdateien
+*.png
+*.jpg
+*.jpeg
+*.pkg.tar.zst
+tessdata/
