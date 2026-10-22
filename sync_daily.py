@@ -169,16 +169,17 @@ def upload_via_sftp(local_file: str, remote_filename: str) -> bool:
         return False
 
 
-def upload_via_webhook(url: str, token: str, kw: int, year: int, csv_content: str) -> bool:
+def upload_via_webhook(url: str, token: str, kw: int, year: int, csv_content: str, source: str = "l") -> bool:
     """Sendet die CSV-Daten per verschlüsseltem HTTPS-POST an die index.php auf Hetzner."""
-    log(f"🚀 Übertrage KW {kw}/{year} per HTTPS-Webhook an {url}...")
+    log(f"🚀 Übertrage KW {kw}/{year} per HTTPS-Webhook an {url} (Quelle: {source})...")
 
     post_data = urllib.parse.urlencode({
         "action": "api_sync",
         "token": token,
         "kw": str(kw),
         "jahr": str(year),
-        "csv_content": csv_content
+        "csv_content": csv_content,
+        "source": source
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -262,8 +263,10 @@ def run_sync(force: bool = False) -> int:
         return 1
 
     # 3. Zu Hetzner übertragen
-    mode = cfg.get("mode", "sftp").lower()
+    mode = cfg.get("mode", "webhook").lower()
     upload_ok = False
+    is_github = os.environ.get("GITHUB_ACTIONS") == "true" or os.environ.get("SYNC_SOURCE") == "g"
+    sync_source = "g" if is_github else "l"
 
     if mode == "sftp":
         week_ok = upload_via_sftp(week_csv, os.path.basename(week_csv))
@@ -273,11 +276,11 @@ def run_sync(force: bool = False) -> int:
             log("⚠️ SFTP-Upload fehlgeschlagen. Versuche HTTPS-Webhook als Fallback...")
             with open(week_csv, "r", encoding="utf-8") as f:
                 csv_content = f.read()
-            upload_ok = upload_via_webhook(cfg.get("webhook_url", ""), cfg.get("sync_token", ""), menu.kw, menu.jahr, csv_content)
+            upload_ok = upload_via_webhook(cfg.get("webhook_url", ""), cfg.get("sync_token", ""), menu.kw, menu.jahr, csv_content, source=sync_source)
     elif mode == "webhook":
         with open(week_csv, "r", encoding="utf-8") as f:
             csv_content = f.read()
-        upload_ok = upload_via_webhook(cfg.get("webhook_url", ""), cfg.get("sync_token", ""), menu.kw, menu.jahr, csv_content)
+        upload_ok = upload_via_webhook(cfg.get("webhook_url", ""), cfg.get("sync_token", ""), menu.kw, menu.jahr, csv_content, source=sync_source)
     else:
         log(f"⚠️ Unbekannter Übertragungsmodus: '{mode}'. Erlaubt sind 'sftp' oder 'webhook'.")
 
