@@ -44,5 +44,6 @@ jobs:
           SYNC_MODE: 'webhook'
           WEBHOOK_URL: 'https://kantine.alexander-ochs.dev/index.php'
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN || 'kantine-geheim-2026' }}
+          SYNC_SOURCE: 'g'
         run: |
           python3 sync_daily.py --force
