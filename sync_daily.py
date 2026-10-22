@@ -43,7 +43,7 @@ OBFUSCATION_KEY = b"speiseplan-hetzner-secure-key-2026"
 DEFAULT_CONFIG = {
     "mode": "webhook",
     "webhook_url": "https://kantine.alexander-ochs.dev/index.php",
-    "sync_token": "kantine-geheim-2026",
+    "sync_token": "D784AC8549AB49DE5BE2A5AEF1EC6A679577DFBDD68DCF02EA209199004C2959",
     "sftp_host": "",
     "sftp_user": "",
     "sftp_remote_dir": "data"
