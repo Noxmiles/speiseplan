@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Speiseplan CLI - HessenTreff im HMdI (Kaiberg Kitchen)
+Speiseplan CLI - HessenTreff (Kaiberg Kitchen)
 Lädt den wöchentlichen Speiseplan per OCR von der Webseite herunter, speichert ihn
 in CSV-Dateien (pro KW und Langzeitarchiv), ermöglicht flexible Abfragen, Archivsuche,
 statistische Auswertungen (inkl. Fleischarten) und Lieblingsgericht-Benachrichtigungen.
@@ -33,6 +33,7 @@ import json
 import shutil
 import subprocess
 import argparse
+import functools
 import urllib.request
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any, Optional
@@ -143,6 +144,86 @@ def cmd_install_help():
 
 
 # ==============================================================================
+# OCR-KORREKTURMATRIX & SPRACHKONFIGURATION
+# ==============================================================================
+
+OCR_REPLACEMENTS = [
+    # Umlaute & Käse
+    (r"\bK[a-z]{0,2}se\b", "Käse"),
+    (r"kdse", "käse"),
+    (r"Kdse", "Käse"),
+    (r"\bKase\b", "Käse"),
+    (r"\bK[da]sesp[ad]tzle\b", "Käsespätzle"),
+    # Hähnchen
+    (r"H[da]hnchen", "Hähnchen"),
+    # Döner & Burger
+    (r"D[eé]nerteller", "Dönerteller"),
+    # Kürbis (Kürbissuppe, Hokkaido-Kürbis, Ofenkürbis, Kürbiskerne)
+    (r"K[iua]rbis", "Kürbis"),
+    # Kräuter
+    (r"Kr[da]uter", "Kräuter"),
+    # Frühlingsröllchen
+    (r"Fr[iuü]h?lingsr[a-z]{2,5}chen", "Frühlingsröllchen"),
+    # Süßkartoffeln
+    (r"S[uü][Rrs]+kartoffel", "Süßkartoffel"),
+    # Soße / Sauce
+    (r"Paprikarahmso[Rc]e", "Paprikarahmsoße"),
+    (r"([a-z]+)so[Rc]e\b", r"\1soße"),
+    (r"\bSo[Rc]e\b", "Soße"),
+    # Geröstet
+    (r"ger[ode]stet([a-z]*)", r"geröstet\1"),
+    # Püree & Spätzle
+    (r"Kartoffel[piu]+ree", "Kartoffelpüree"),
+    (r"([bB]utter|[kK]äse)sp[ad]tzle", r"\1spätzle"),
+    (r"\bSp[ad]tzle\b", "Spätzle"),
+    # Klöße & Köttbullar
+    (r"K[oe]ttbullar", "Köttbullar"),
+    (r"Kartoffelklo[Rsc]+e", "Kartoffelklöße"),
+    (r"Markkl[od][Rsc]+chen", "Markklößchen"),
+    # Nüsse & Trüffel & Gemüse
+    (r"Waln[ui]sse", "Walnüsse"),
+    (r"Tr[ui]ffel[oeo]?l?", "Trüffelöl"),
+    (r"Tr[ui]ffel", "Trüffel"),
+    (r"([a-zA-Z]*)gem[ui]se\b", r"\1gemüse"),
+    (r"([a-zA-Z]*)Gem[ui]se\b", r"\1Gemüse"),
+    (r"W[ui]rstchen", "Würstchen"),
+    (r"Bohnensu\s*ppe", "Bohnensuppe"),
+]
+
+
+def normalize_ocr_text(text: str) -> str:
+    """Bereinigt typische OCR-Fehlinterpretationen von Umlauten und Sonderzeichen."""
+    for pattern, repl in OCR_REPLACEMENTS:
+        text = re.sub(pattern, repl, text)
+    return text
+
+
+@functools.lru_cache(maxsize=1)
+def get_tesseract_ocr_args() -> List[str]:
+    """Ermittelt die optimalen Argumente für Tesseract (Sprachflag deu und tessdata-Pfad)."""
+    tess_bin = find_tesseract_binary()
+    if not tess_bin:
+        return []
+
+    # 1. Prüfen auf lokales tessdata Verzeichnis im Projekt (z.B. tessdata_best/deu.traineddata)
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    local_tessdata = os.path.join(project_dir, "tessdata")
+    if os.path.isfile(os.path.join(local_tessdata, "deu.traineddata")):
+        return ["--tessdata-dir", local_tessdata, "-l", "deu"]
+
+    # 2. Prüfen, ob das System-Tesseract 'deu' installiert hat
+    try:
+        res = subprocess.run([tess_bin, "--list-langs"], capture_output=True, text=True, timeout=5)
+        langs = [l.strip() for l in res.stdout.splitlines() if l.strip() and not l.startswith("List of")]
+        if "deu" in langs:
+            return ["-l", "deu"]
+    except Exception:
+        pass
+
+    return []
+
+
+# ==============================================================================
 # 2. DATENMODELLE
 # ==============================================================================
 
@@ -171,7 +252,7 @@ class Dish:
             datum=str(data["datum"]),
             wochentag=str(data["wochentag"]),
             kategorie=str(data["kategorie"]),
-            gericht=str(data.get("gericht", "")),
+            gericht=normalize_ocr_text(str(data.get("gericht", ""))),
             preis_mitarbeiter=str(data.get("preis_mitarbeiter", "")),
             preis_gaeste=str(data.get("preis_gaeste", "")),
             eigenschaften=str(data.get("eigenschaften", "")),
@@ -297,18 +378,8 @@ def fetch_latest_menu_image(output_dir: str = IMAGES_DIR, canteen: str = DEFAULT
 # 4. OCR & TABELLEN-PARSER (TESSERACT + PILLOW)
 # ==============================================================================
 
-OCR_REPLACEMENTS = [
-    (r"kdse", "käse"), (r"Kdse", "Käse"), (r"Hdhnchen", "Hähnchen"), (r"Hahnchen", "Hähnchen"),
-    (r"D[eé]nerteller", "Dönerteller"), (r"Kurbis", "Kürbis"), (r"Kiirbis", "Kürbis"),
-    (r"Krduter", "Kräuter"), (r"Krauter", "Kräuter"), (r"Frihlingsr[ée]lichen", "Frühlingsröllchen"),
-    (r"Frithlingsr[ée]llchen", "Frühlingsröllchen"), (r"SuRkartoffeln", "Süßkartoffeln"),
-    (r"PaprikarahmsoRe", "Paprikarahmsoße"), (r"gerostete", "geröstete"), (r"gerdstete", "geröstete"),
-    (r"Kartoffelpiiree", "Kartoffelpüree"), (r"Bohnensu\s*ppe", "Bohnensuppe")
-]
-
-
 def run_tesseract(crop: Image.Image, psm: int = 6) -> str:
-    """Führt Tesseract über stdin/stdout auf einem Bildausschnitt aus."""
+    """Führt Tesseract über stdin/stdout auf einem Bildausschnitt aus (mit deutschem Sprachmodell & tessdata_best)."""
     tess_bin = find_tesseract_binary()
     if not tess_bin:
         print_missing_tesseract_help()
@@ -316,15 +387,10 @@ def run_tesseract(crop: Image.Image, psm: int = 6) -> str:
 
     buf = io.BytesIO()
     crop.save(buf, format="PNG")
-    cmd = [tess_bin, "stdin", "stdout", "--psm", str(psm)]
+    ocr_args = get_tesseract_ocr_args()
+    cmd = [tess_bin, "stdin", "stdout"] + ocr_args + ["--psm", str(psm)]
     res = subprocess.run(cmd, input=buf.getvalue(), capture_output=True)
     return res.stdout.decode("utf-8", errors="ignore").strip()
-
-
-def normalize_ocr_text(text: str) -> str:
-    for pattern, repl in OCR_REPLACEMENTS:
-        text = re.sub(pattern, repl, text, flags=re.I)
-    return text
 
 
 def detect_grid(image: Image.Image) -> Tuple[List[int], List[int]]:
@@ -976,7 +1042,7 @@ def cmd_show(args, wm: WatchlistManager):
 
     # Fall C: Komplette Wochenübersicht
     elif target in ["woche", "week", "alle"]:
-        print(f"\n{BOLD}SPEISEPLAN KW {menu.kw} ({menu.start_date} bis {menu.end_date}) - HessenTreff im HMdI{RESET}\n")
+        print(f"\n{BOLD}SPEISEPLAN KW {menu.kw} ({menu.start_date} bis {menu.end_date}) - HessenTreff (Kaiberg Kitchen){RESET}\n")
         for w in ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]:
             dm = menu.get_day(w)
             if dm:
@@ -1203,7 +1269,7 @@ def cmd_stats(args):
 # 10. HAUPTEINSTIEG & HILFESEITE
 # ==============================================================================
 
-DOC_DESCRIPTION = f"""{BOLD}Speiseplan CLI - HessenTreff im HMdI (Kaiberg Kitchen){RESET}
+DOC_DESCRIPTION = f"""{BOLD}Speiseplan CLI - HessenTreff (Kaiberg Kitchen){RESET}
 Lädt den wöchentlichen Speiseplan per OCR von der Webseite herunter, speichert ihn
 in CSV-Dateien (pro KW und Langzeitarchiv), ermöglicht flexible Abfragen, Archivsuche,
 statistische Auswertungen (inkl. Fleischarten) und Lieblingsgericht-Benachrichtigungen.
