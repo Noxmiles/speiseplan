@@ -805,7 +805,7 @@ class CanteenAnalytics:
                 elif any(k in text for k in ["rind", "rinder", "beef", "hackfleisch", "roulade", "gulasch"]):
                     counter["Rind / Kalb"] += 1
                 else:
-                    counter["Sonstiges"] += 1
+                    counter["Sonstiges / nicht explizit genannt"] += 1
         return dict(counter)
 
     def analyze_dish(self, query: str) -> Dict[str, Any]:
