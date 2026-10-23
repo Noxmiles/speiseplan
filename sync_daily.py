@@ -234,9 +234,10 @@ def run_sync(force: bool = False) -> int:
     if not force:
         last_date = state.get("last_sync_date", "")
         last_kw = state.get("last_sync_kw", 0)
+        last_year = state.get("last_sync_year", 0)
         last_success = state.get("last_sync_success", False)
 
-        if last_date == today_str and last_kw == cur_kw and last_success:
+        if last_date == today_str and last_kw == cur_kw and last_year == cur_year and last_success:
             log(f"ℹ Heute bereits erfolgreich für KW {cur_kw} synchronisiert. Keine Aktion erforderlich.")
             return 0
 

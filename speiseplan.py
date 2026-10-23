@@ -507,12 +507,22 @@ def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, st
     date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*-\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", header_text)
     if date_match:
         d1, m1, y1, d2, m2, y2 = date_match.groups()
-        jahr = int(y1)
-        start_date = f"{jahr:04d}-{int(m1):02d}-{int(d1):02d}"
-        end_date = f"{int(y2):04d}-{int(m2):02d}-{int(d2):02d}"
+        try:
+            start_dt = datetime(int(y1), int(m1), int(d1))
+            # Das ISO-Jahr entspricht immer dem Kalenderjahr des Donnerstags (Montag + 3 Tage)
+            thursday_dt = start_dt + timedelta(days=3)
+            jahr = thursday_dt.isocalendar()[0]
+            start_date = start_dt.strftime("%Y-%m-%d")
+            end_date = datetime(int(y2), int(m2), int(d2)).strftime("%Y-%m-%d")
+            if not kw_match:
+                kw = thursday_dt.isocalendar()[1]
+        except ValueError:
+            jahr = int(y1)
+            start_date = f"{jahr:04d}-{int(m1):02d}-{int(d1):02d}"
+            end_date = f"{int(y2):04d}-{int(m2):02d}-{int(d2):02d}"
     else:
         now = datetime.now()
-        jahr = now.year
+        jahr = now.isocalendar()[0]
         start_date = now.strftime("%Y-%m-%d")
         end_date = (now + timedelta(days=4)).strftime("%Y-%m-%d")
 
@@ -712,8 +722,14 @@ def load_archive_dishes(data_dir: str = DATA_DIR) -> List[Dish]:
 def find_latest_local_week(data_dir: str = DATA_DIR) -> Optional[WeekMenu]:
     if not os.path.exists(data_dir):
         return None
-    files = sorted([f for f in os.listdir(data_dir) if f.startswith("kw") and f.endswith(".csv")], reverse=True)
-    return load_week_csv(os.path.join(data_dir, files[0])) if files else None
+    files = [f for f in os.listdir(data_dir) if f.startswith("kw") and f.endswith(".csv")]
+    if not files:
+        return None
+    def week_key(filename: str) -> Tuple[int, int]:
+        m = re.search(r"kw(\d+)_(\d+)\.csv", filename)
+        return (int(m.group(2)), int(m.group(1))) if m else (0, 0)
+    files.sort(key=week_key, reverse=True)
+    return load_week_csv(os.path.join(data_dir, files[0]))
 
 
 # ==============================================================================
@@ -959,7 +975,7 @@ def generate_demo_archive(num_weeks: int = 20) -> List[Dish]:
 
     for w_idx in range(num_weeks):
         monday = base_monday + timedelta(weeks=w_idx)
-        kw, year = monday.isocalendar()[1], monday.year
+        kw, year = monday.isocalendar()[1], monday.isocalendar()[0]
         for d_idx, wday in enumerate(["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]):
             dt = (monday + timedelta(days=d_idx)).strftime("%Y-%m-%d")
             # Suppe
