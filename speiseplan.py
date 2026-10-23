@@ -198,6 +198,54 @@ def normalize_ocr_text(text: str) -> str:
     return text
 
 
+DECORATIVE_WORDS = [
+    "paniert", "saftig", "knusprig", "ausgebacken", "zart", "fein",
+    "ofenfrisch", "hausgemacht", "frisch", "herzhaft", "gebraten", "goldbraun",
+    "cremig", "würzige", "vegetarisches", "vegetarische"
+]
+DEC_PATTERN = re.compile(
+    r"^\s*(" + "|".join(DECORATIVE_WORDS) + r")(?:es|er|em|en|e|s)?\b\s*",
+    flags=re.I
+)
+DANGLING_PREPS = {"vom", "von", "in", "an", "auf", "mit", "nach", "aus", "im", "bei"}
+
+
+def fix_dangling_components(dish_text: str) -> str:
+    """Verbindet Zeilenfragmente, die mit einer Präposition (vom, in, an) oder Bindestrich abbrechen."""
+    parts = [p.strip() for p in dish_text.split("|") if p.strip()]
+    merged = []
+    i = 0
+    while i < len(parts):
+        curr = parts[i]
+        while i + 1 < len(parts):
+            if curr.endswith("-"):
+                curr = curr.rstrip("-").strip() + " " + parts[i + 1]
+                i += 1
+                continue
+            last_word = curr.rstrip().split()[-1].lower() if curr.split() else ""
+            if last_word in DANGLING_PREPS:
+                curr = f"{curr} {parts[i + 1]}"
+                i += 1
+            else:
+                break
+        merged.append(curr)
+        i += 1
+    return " | ".join(merged)
+
+
+def get_canonical_dish(dish_text: str) -> str:
+    """Extrahiert die Hauptkomponente eines Gerichts (ohne Füll-Adjektive und abbrechende Satzteile)."""
+    cleaned = fix_dangling_components(dish_text)
+    head = cleaned.split("|")[0].strip()
+    head = re.sub(r"^[\"\'„“»«\s]+|[\"\'„“»«\s]+$", "", head)
+    prev = None
+    while prev != head:
+        prev = head
+        head = DEC_PATTERN.sub("", head).strip()
+    head = re.sub(r"[\"\'„“»«]", "", head).strip()
+    return head
+
+
 @functools.lru_cache(maxsize=1)
 def get_tesseract_ocr_args() -> List[str]:
     """Ermittelt die optimalen Argumente für Tesseract (Sprachflag deu und tessdata-Pfad)."""
@@ -252,7 +300,7 @@ class Dish:
             datum=str(data["datum"]),
             wochentag=str(data["wochentag"]),
             kategorie=str(data["kategorie"]),
-            gericht=normalize_ocr_text(str(data.get("gericht", ""))),
+            gericht=fix_dangling_components(normalize_ocr_text(str(data.get("gericht", "")))),
             preis_mitarbeiter=str(data.get("preis_mitarbeiter", "")),
             preis_gaeste=str(data.get("preis_gaeste", "")),
             eigenschaften=str(data.get("eigenschaften", "")),
@@ -493,6 +541,7 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
 
     dish = " | ".join(dish_lines) if dish_lines else (lines[0] if lines else "")
     dish = re.sub(r"\s*\|\s*$", "", re.sub(r"^\s*\|\s*", "", dish))
+    dish = fix_dangling_components(dish)
     return dish, calories, allergens
 
 
@@ -763,7 +812,7 @@ class CanteenAnalytics:
         kws = sorted({(d.kw, d.jahr) for d in self.dishes})
         diet_counter = Counter(d.eigenschaften if d.eigenschaften else "Fleisch / Klassisch" for d in self.dishes)
 
-        filtered = [d.gericht for d in self.dishes if d.gericht.lower() not in ["salatbar", "tagesgericht", ""]]
+        filtered = [get_canonical_dish(d.gericht) for d in self.dishes if d.gericht.lower() not in ["salatbar", "tagesgericht", ""]]
         top_dishes = Counter(filtered).most_common(5)
         counts = Counter(filtered)
 
@@ -805,7 +854,7 @@ class CanteenAnalytics:
                 elif any(k in text for k in ["rind", "rinder", "beef", "hackfleisch", "roulade", "gulasch"]):
                     counter["Rind / Kalb"] += 1
                 else:
-                    counter["Sonstiges / nicht explizit genannt"] += 1
+                    counter["Nicht explizit genannt / Tagesgericht"] += 1
         return dict(counter)
 
     def analyze_dish(self, query: str) -> Dict[str, Any]:
@@ -864,7 +913,7 @@ class CanteenAnalytics:
         }
 
     def get_lifecycle(self) -> Dict[str, Any]:
-        filtered = [d.gericht for d in self.dishes if d.gericht.lower() not in ["salatbar", "tagesgericht", ""]]
+        filtered = [get_canonical_dish(d.gericht) for d in self.dishes if d.gericht.lower() not in ["salatbar", "tagesgericht", ""]]
         counts = Counter(filtered)
         return {
             "staples": [(dish, cnt) for dish, cnt in counts.most_common() if cnt >= 3][:10],
