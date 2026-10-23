@@ -530,14 +530,16 @@ def update_archive_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> int:
             for row in csv.DictReader(f, delimiter=";"):
                 try:
                     d = Dish.from_dict(row)
-                    existing[(d.datum, d.kategorie)] = d
+                    norm_cat = re.sub(r"\s+", "", d.kategorie.lower())
+                    existing[(d.datum, norm_cat)] = d
                 except Exception:
                     pass
 
     for dish in menu.all_dishes():
-        existing[(dish.datum, dish.kategorie)] = dish
+        norm_cat = re.sub(r"\s+", "", dish.kategorie.lower())
+        existing[(dish.datum, norm_cat)] = dish
 
-    sorted_dishes = sorted(existing.values(), key=lambda x: (x.datum, x.kategorie))
+    sorted_dishes = sorted(existing.values(), key=lambda x: (x.datum, re.sub(r"\s+", "", x.kategorie.lower())), reverse=True)
     with open(archive_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, delimiter=";")
         writer.writeheader()
