@@ -149,7 +149,7 @@ def cmd_install_help():
 
 OCR_REPLACEMENTS = [
     # Umlaute & Käse
-    (r"\bK[a-z]{0,2}se\b", "Käse"),
+    (r"\bK(?:[äaöde]{1,2}|)se\b", "Käse"),
     (r"kdse", "käse"),
     (r"Kdse", "Käse"),
     (r"\bKase\b", "Käse"),
@@ -182,7 +182,7 @@ OCR_REPLACEMENTS = [
     (r"Markkl[od][Rsc]+chen", "Markklößchen"),
     # Nüsse & Trüffel & Gemüse
     (r"Waln[ui]sse", "Walnüsse"),
-    (r"Tr[ui]ffel[oeo]?l?", "Trüffelöl"),
+    (r"Tr[uiü]ffel(?:[öo]l|\böl)", "Trüffelöl"),
     (r"Tr[ui]ffel", "Trüffel"),
     (r"([a-zA-Z]*)gem[ui]se\b", r"\1gemüse"),
     (r"([a-zA-Z]*)Gem[ui]se\b", r"\1Gemüse"),
@@ -698,9 +698,12 @@ def search_archive(query: str, data_dir: str = DATA_DIR) -> List[Dish]:
     matches = []
     with open(archive_path, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f, delimiter=";"):
-            d = Dish.from_dict(row)
-            if q in d.gericht.lower() or q in d.kategorie.lower():
-                matches.append(d)
+            try:
+                d = Dish.from_dict(row)
+                if q in d.gericht.lower() or q in d.kategorie.lower():
+                    matches.append(d)
+            except Exception:
+                pass
     matches.sort(key=lambda x: x.datum, reverse=True)
     return matches
 

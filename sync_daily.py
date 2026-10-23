@@ -109,9 +109,6 @@ def load_sftp_credentials() -> tuple[str, str, str]:
     except Exception as e:
         log(f"⚠️ Fehler beim Lesen der SFTP-Zugangsdaten: {e}")
         return "", "", ""
-    except Exception as e:
-        log(f"⚠️ Fehler beim Lesen der SFTP-Zugangsdaten: {e}")
-        return "", "", ""
 
 
 def load_state() -> dict:
@@ -126,11 +123,13 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Speichert den Status atomar."""
+    """Speichert den Status atomar mit rename."""
     try:
         os.makedirs(sp.DATA_DIR, exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        tmp_file = STATE_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, STATE_FILE)
     except Exception as e:
         log(f"⚠️ Konnte Status nicht speichern: {e}")
 
