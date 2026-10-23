@@ -201,7 +201,7 @@ def normalize_ocr_text(text: str) -> str:
 DECORATIVE_WORDS = [
     "paniert", "saftig", "knusprig", "ausgebacken", "zart", "fein",
     "ofenfrisch", "hausgemacht", "frisch", "herzhaft", "gebraten", "goldbraun",
-    "cremig", "würzige", "vegetarisches", "vegetarische"
+    "cremig", "würzig", "vegetarisch"
 ]
 DEC_PATTERN = re.compile(
     r"^\s*(" + "|".join(DECORATIVE_WORDS) + r")(?:es|er|em|en|e|s)?\b\s*",
@@ -213,21 +213,34 @@ DANGLING_PREPS = {"vom", "von", "in", "an", "auf", "mit", "nach", "aus", "im", "
 def fix_dangling_components(dish_text: str) -> str:
     """Verbindet Zeilenfragmente, die mit einer Präposition (vom, in, an) oder Bindestrich abbrechen."""
     parts = [p.strip() for p in dish_text.split("|") if p.strip()]
+    if not parts:
+        return ""
     merged = []
     i = 0
     while i < len(parts):
         curr = parts[i]
         while i + 1 < len(parts):
+            next_part = parts[i + 1]
+            # Fall 1: curr endet mit Bindestrich (z.B. 'Toskanische-')
             if curr.endswith("-"):
-                curr = curr.rstrip("-").strip() + " " + parts[i + 1]
+                curr = curr.rstrip("-").strip() + " " + next_part
                 i += 1
                 continue
-            last_word = curr.rstrip().split()[-1].lower() if curr.split() else ""
-            if last_word in DANGLING_PREPS:
-                curr = f"{curr} {parts[i + 1]}"
+            # Fall 2: curr endet mit einer Präposition (auch bei Satzzeichen wie 'vom,')
+            last_token = curr.rstrip().split()[-1].lower() if curr.split() else ""
+            clean_last = re.sub(r"^[^\w]+|[^\w]+$", "", last_token)
+            if clean_last in DANGLING_PREPS:
+                curr = f"{curr} {next_part}"
                 i += 1
-            else:
-                break
+                continue
+            # Fall 3: next_part beginnt mit einer Präposition (z.B. 'Paniertes Schnitzel' | 'vom Schwein')
+            first_token = next_part.lstrip().split()[0].lower() if next_part.split() else ""
+            clean_first = re.sub(r"^[^\w]+|[^\w]+$", "", first_token)
+            if clean_first in DANGLING_PREPS and first_token == clean_first:
+                curr = f"{curr} {next_part}"
+                i += 1
+                continue
+            break
         merged.append(curr)
         i += 1
     return " | ".join(merged)
@@ -236,14 +249,17 @@ def fix_dangling_components(dish_text: str) -> str:
 def get_canonical_dish(dish_text: str) -> str:
     """Extrahiert die Hauptkomponente eines Gerichts (ohne Füll-Adjektive und abbrechende Satzteile)."""
     cleaned = fix_dangling_components(dish_text)
+    if not cleaned:
+        return ""
     head = cleaned.split("|")[0].strip()
     head = re.sub(r"^[\"\'„“»«\s]+|[\"\'„“»«\s]+$", "", head)
+    orig_head = head
     prev = None
     while prev != head:
         prev = head
         head = DEC_PATTERN.sub("", head).strip()
     head = re.sub(r"[\"\'„“»«]", "", head).strip()
-    return head
+    return head if head else orig_head
 
 
 @functools.lru_cache(maxsize=1)
