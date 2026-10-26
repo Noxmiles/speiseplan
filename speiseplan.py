@@ -182,12 +182,23 @@ OCR_REPLACEMENTS = [
     (r"Markkl[od][Rsc]+chen", "Markklößchen"),
     # Nüsse & Trüffel & Gemüse
     (r"Waln[ui]sse", "Walnüsse"),
+    (r"Erdn[ui]sse", "Erdnüsse"),
     (r"Tr[uiü]ffel(?:[öo]l|\böl)", "Trüffelöl"),
     (r"Tr[ui]ffel", "Trüffel"),
     (r"([a-zA-Z]*)gem[ui]se\b", r"\1gemüse"),
     (r"([a-zA-Z]*)Gem[ui]se\b", r"\1Gemüse"),
     (r"W[ui]rstchen", "Würstchen"),
     (r"Bohnensu\s*ppe", "Bohnensuppe"),
+    # Speisen der Kaiberg-Kantinen (SevenGardens, Dow, HessenTreff)
+    (r"Spinatkn[oö]del", "Spinatknödel"),
+    (r"\bKn[oö]del\b", "Knödel"),
+    (r"S[uü]dtiroler", "Südtiroler"),
+    (r"Fl[aä]dlesuppe", "Flädlesuppe"),
+    (r"Kr[aä]uters[uü]ppchen", "Kräutersüppchen"),
+    (r"Cevapcici", "Cevapcici"),
+    (r"Steinpilzrahm", "Steinpilzrahm"),
+    (r"Pangasius(?:filet)?", "Pangasiusfilet"),
+    (r"all['’]?Arrabbiata", "all’Arrabbiata"),
 ]
 
 
@@ -604,9 +615,11 @@ def is_allergen_line(line: str) -> bool:
         return False
 
     for t in tokens:
-        if len(t) >= 3 and not t.isupper() and not t.isdigit():
+        if t.isdigit() and len(t) <= 6:
+            continue
+        if len(t) >= 3 and not t.isupper():
             return False
-        if not re.match(r"^(?:[0-9]{1,2}|[A-Z]{1,2})$", t):
+        if not re.match(r"^(?:[0-9]{1,4}|[A-Z]{1,2})$", t):
             return False
 
     return True
@@ -627,8 +640,9 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
             prefix = line[:cal_match.start()].strip()
             if prefix and not is_allergen_line(prefix):
                 cleaned_pre = re.sub(r"[\s\|]+(?:u\s*)?[©®»«“”\"]+\s*$", "", prefix).strip()
+                cleaned_pre = re.sub(r"[\s\|]+\bca\.?\s*$", "", cleaned_pre, flags=re.I).strip()
                 cleaned_pre = re.sub(r"^[\s\/\|\*]+\s*", "", cleaned_pre).strip()
-                if cleaned_pre:
+                if cleaned_pre.lower() not in ["ca", "ca.", "ca.*"] and cleaned_pre:
                     dish_lines.append(cleaned_pre)
         elif is_allergen_line(line):
             clean_alg = re.sub(r"^[\s\.\*\+\-\|©®»«“”\"\'„‘]+|[\s\.\*\+\-\|©®»«“”\"\'„‘]+$", "", line).strip()
@@ -637,9 +651,12 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
         elif line.lower() in ["vegan", "vegetarisch"] or re.match(r"^[\s\.\,\'\"\‘\’\“\”\©\®\»\«\-\|\/uX]+$", line):
             continue
         else:
-            # Trailing OCR-Junk wie 'u ©' oder '“©' entfernen
+            # Trailing OCR-Junk wie 'u ©' oder '“©' oder abbrechende 'ca.' entfernen
             cleaned_line = re.sub(r"[\s\|]+(?:u\s*)?[©®»«“”\"]+\s*$", "", line).strip()
+            cleaned_line = re.sub(r"[\s\|]+\bca\.?\s*$", "", cleaned_line, flags=re.I).strip()
             cleaned_line = re.sub(r"^[\s\/\|\*]+\s*", "", cleaned_line).strip()
+            if cleaned_line.lower() in ["ca", "ca.", "ca.*"]:
+                continue
             if cleaned_line:
                 dish_lines.append(cleaned_line)
 
@@ -701,15 +718,21 @@ def parse_menu_image(image_path: str) -> WeekMenu:
             cell = img.crop((v_lines[c_idx] + 3, h_lines[r_idx] + 3, v_lines[c_idx + 1] - 3, h_lines[r_idx + 1] - 3))
             raw = run_tesseract(cell, psm=6)
             dish_text, cal, alg = clean_cell_text(raw)
+
+            # Generischen Platzhalter 'Tagesgericht' komplett überspringen (kein Mehrwert)
+            if dish_text.strip().lower() == "tagesgericht":
+                continue
+
             diet = detect_diet_badge(cell)
             if not diet:
                 low = raw.lower()
                 diet = "Vegan" if "vegan" in low else ("Vegetarisch" if "vegetarisch" in low else "")
 
+            # Allergene werden komplett weggelassen (Hinweis verweist auf Originalseite)
             days[wday].dishes.append(Dish(
                 kw=kw, jahr=jahr, datum=day_dates[wday], wochentag=wday,
                 kategorie=cat_name, gericht=dish_text, preis_mitarbeiter=p_ma,
-                preis_gaeste=p_gaeste, eigenschaften=diet, kalorien=cal, allergene=alg
+                preis_gaeste=p_gaeste, eigenschaften=diet, kalorien=cal, allergene=""
             ))
 
     return WeekMenu(kw=kw, jahr=jahr, start_date=start_d, end_date=end_d, days=days)
@@ -730,6 +753,8 @@ def save_week_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> str:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, delimiter=";")
         writer.writeheader()
         for dish in menu.all_dishes():
+            if dish.gericht.strip().lower() == "tagesgericht":
+                continue
             writer.writerow(dish.to_dict())
     return target
 
@@ -767,12 +792,16 @@ def update_archive_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> int:
             for row in csv.DictReader(f, delimiter=";"):
                 try:
                     d = Dish.from_dict(row)
+                    if d.gericht.strip().lower() == "tagesgericht":
+                        continue
                     norm_cat = re.sub(r"\s+", "", d.kategorie.lower())
                     existing[(d.datum, norm_cat)] = d
                 except Exception:
                     pass
 
     for dish in menu.all_dishes():
+        if dish.gericht.strip().lower() == "tagesgericht":
+            continue
         norm_cat = re.sub(r"\s+", "", dish.kategorie.lower())
         existing[(dish.datum, norm_cat)] = dish
 
@@ -966,26 +995,28 @@ class CanteenAnalytics:
         }
 
     def get_meat_distribution(self) -> Dict[str, int]:
-        """Klassifiziert Hauptgerichte nach Fleischarten und Ernährungsformen."""
+        """Klassifiziert Hauptgerichte nach Fleischarten und Ernährungsformen (ohne Tagesgericht/Salatbar)."""
         counter = Counter()
         for d in self.dishes:
             if "leibspeise" in d.kategorie.lower():
-                text = d.gericht.lower()
+                text = d.gericht.lower().strip()
+                if not text or text in ["tagesgericht", "salatbar"]:
+                    continue
                 diet = d.eigenschaften.lower()
                 if "vegan" in diet or "vegan" in text:
                     counter["Vegan"] += 1
                 elif "vegetarisch" in diet or "vegetarisch" in text:
                     counter["Vegetarisch"] += 1
-                elif any(k in text for k in ["fisch", "lachs", "scholle", "seelachs", "kabeljau", "knusperfisch"]):
+                elif any(k in text for k in ["fisch", "lachs", "scholle", "seelachs", "kabeljau", "knusperfisch", "pangasius"]):
                     counter["Fisch / Meeresfrüchte"] += 1
                 elif any(k in text for k in ["hähnchen", "hahnchen", "huhn", "pute", "chicken", "geflügel"]):
                     counter["Geflügel (Huhn / Pute)"] += 1
-                elif any(k in text for k in ["schwein", "schnitzel", "leberkäse", "leberkase", "kotelett", "schinken", "speck"]):
+                elif any(k in text for k in ["schwein", "schnitzel", "leberkäse", "leberkase", "kotelett", "schinken", "speck", "cevapcici"]):
                     counter["Schwein"] += 1
                 elif any(k in text for k in ["rind", "rinder", "beef", "hackfleisch", "roulade", "gulasch"]):
                     counter["Rind / Kalb"] += 1
                 else:
-                    counter["Nicht explizit genannt / Tagesgericht"] += 1
+                    counter["Sonstiges / nicht explizit genannt"] += 1
         return dict(counter)
 
     def analyze_dish(self, query: str) -> Dict[str, Any]:
