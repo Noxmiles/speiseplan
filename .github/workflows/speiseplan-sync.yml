@@ -28,7 +28,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: 🔍 Tesseract OCR & beste deutsche Sprachdaten (tessdata_best) installieren
         run: |
@@ -37,7 +36,7 @@ jobs:
           # tessdata_best für maximale Erkennungspräzision (Float32 Modell) herunterladen
           TESSDATA_DIR=$(tesseract --list-langs 2>&1 | grep -oP '(?<=in ")[^"]+' || echo "/usr/share/tessdata")
           echo "Hauptverzeichnis tessdata: ${TESSDATA_DIR}"
-          sudo curl -fsSL -o "${TESSDATA_DIR}/deu.traineddata" https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/deu.traineddata
+          sudo curl -fsSL --retry 3 --retry-delay 2 -o "${TESSDATA_DIR}/deu.traineddata" https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/deu.traineddata
           # Auch in parallele Tesseract-Verzeichnisse kopieren falls vorhanden
           for dir in /usr/share/tessdata /usr/share/tesseract-ocr/4.00/tessdata /usr/share/tesseract-ocr/5/tessdata; do
             if [ -d "$dir" ] && [ "$dir" != "${TESSDATA_DIR%/}" ]; then
@@ -48,7 +47,7 @@ jobs:
 
       - name: 📦 Python-Pakete installieren
         run: |
-          pip install --no-cache-dir -r requirements.txt
+          pip install -r requirements.txt
 
       - name: 🚀 OCR ausführen & Speiseplan live zu Hetzner beamen
         env:
