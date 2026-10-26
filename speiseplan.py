@@ -660,9 +660,26 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
             if cleaned_line:
                 dish_lines.append(cleaned_line)
 
-    dish = " | ".join(dish_lines) if dish_lines else (lines[0] if lines else "")
-    dish = re.sub(r"\s*\|\s*$", "", re.sub(r"^\s*\|\s*", "", dish))
-    dish = fix_dangling_components(dish)
+    # Zeilen zu natürlichem Fließtext verbinden (ohne künstliche Pipe-Striche)
+    cleaned_lines = []
+    for dl in dish_lines:
+        dl = dl.replace("|", " ").strip()
+        if dl:
+            cleaned_lines.append(dl)
+
+    if cleaned_lines:
+        res = []
+        for cl in cleaned_lines:
+            if res and res[-1].endswith("-"):
+                res[-1] = res[-1].rstrip("-").strip() + " " + cl
+            else:
+                res.append(cl)
+        dish = " ".join(res)
+    else:
+        dish = lines[0] if lines else ""
+
+    dish = dish.replace("|", " ")
+    dish = re.sub(r"\s+", " ", dish).strip()
     allergens = ", ".join(allergen_parts) if allergen_parts else ""
     return dish, calories, allergens
 
