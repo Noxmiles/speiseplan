@@ -367,7 +367,7 @@ def get_menu_image_url(page_url: str = DEFAULT_URL, canteen: str = DEFAULT_CANTE
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
 
-        # Suche nach Überschrift mit Kantinenname
+        # Suche nach Überschrift mit Kantinenname (z.B. 'HessenTreff im HMdI')
         target_heading = None
         for heading in soup.find_all(["h1", "h2", "h3", "h4", "strong", "p"]):
             if canteen.lower() in heading.get_text().lower():
@@ -377,27 +377,40 @@ def get_menu_image_url(page_url: str = DEFAULT_URL, canteen: str = DEFAULT_CANTE
         if not target_heading:
             raise ValueError(f"Kantine '{canteen}' konnte auf {page_url} nicht gefunden werden.")
 
-        # In Eltern-Containern nach der Wochenkarte suchen
-        node = target_heading
-        menu_img = None
-        for _ in range(6):
-            if not node.parent:
-                break
-            node = node.parent
-            for fig in node.find_all("figure"):
-                if "wochenkarte" in fig.get_text().lower():
-                    img = fig.find("img")
-                    if img:
-                        menu_img = img
-                        break
-            if menu_img:
-                break
+        # Liste anderer Kantinen zur Grenzziehung im Dokument
+        other_canteens = [c for c in ["sevengardens", "hessentreff", "dow"] if c != canteen.lower()]
 
+        # Suche vorwärts ab target_heading bis zur nächsten Kantine
+        menu_img = None
+        curr = target_heading
+        while curr:
+            curr = curr.next_element
+            if not curr:
+                break
+            if getattr(curr, "name", None) in ["h1", "h2", "h3", "h4", "strong", "p"]:
+                t = curr.get_text().lower()
+                if any(oc in t for oc in other_canteens):
+                    break
+            if getattr(curr, "name", None) == "img":
+                src = curr.get("src", "")
+                if "Bildschirmfoto" in src or "wochenkarte" in src.lower() or "speiseplan" in src.lower():
+                    menu_img = curr
+                    break
+
+        # Fallback auf übergeordnete Container falls im direkten DOM-Fluss nichts gefunden
         if not menu_img:
-            for img in node.find_all("img"):
-                src = img.get("src", "")
-                if "Bildschirmfoto" in src or "wochenkarte" in src.lower():
-                    menu_img = img
+            node = target_heading
+            for _ in range(6):
+                if not node.parent:
+                    break
+                node = node.parent
+                for fig in node.find_all("figure"):
+                    if "wochenkarte" in fig.get_text().lower():
+                        img = fig.find("img")
+                        if img:
+                            menu_img = img
+                            break
+                if menu_img:
                     break
 
         if not menu_img:
@@ -458,13 +471,16 @@ def run_tesseract(crop: Image.Image, psm: int = 6) -> str:
 
 
 def detect_grid(image: Image.Image) -> Tuple[List[int], List[int]]:
-    """Ermittelt die 7 horizontalen und vertikalen Trennlinien des Tabellenrasters."""
+    """Ermittelt die 7 horizontalen und vertikalen Trennlinien des Tabellenrasters.
+    Unterstützt sowohl Style 1 (klassisches Raster mit dunklen Trennlinien)
+    als auch Style 2 (modernes Pastell-/Farb-Design ohne harte schwarze Linien).
+    """
     gray = image.convert("L")
     arr = np.array(gray)
     h, w = arr.shape
 
     # Horizontale Linien (dunkle Pixel < 120)
-    cand_h = np.where((arr < 120).sum(axis=1) > int(w * 0.5))[0]
+    cand_h = np.where((arr < 120).sum(axis=1) > int(w * 0.35))[0]
     h_groups = []
     for idx in cand_h:
         if not h_groups or idx > h_groups[-1][-1] + 6:
@@ -474,24 +490,33 @@ def detect_grid(image: Image.Image) -> Tuple[List[int], List[int]]:
     h_lines = [int(np.mean(g)) for g in h_groups if len(g) >= 1]
     h_lines = [y for y in h_lines if int(h * 0.15) < y < int(h * 0.95)]
 
-    # Fallback bei Abweichung
-    if len(h_lines) != 7:
-        h_lines = [int(h * r) for r in [0.1966, 0.2371, 0.3298, 0.4895, 0.6722, 0.7873, 0.8696]]
+    # Style 1: Wenn ca. 5 bis 8 dunkle horizontale Linien gefunden wurden
+    if len(h_lines) >= 5:
+        if len(h_lines) != 7:
+            h_lines = [int(h * r) for r in [0.1966, 0.2371, 0.3298, 0.4895, 0.6722, 0.7873, 0.8696]]
 
-    # Vertikale Linien
-    sub = arr[h_lines[0]:h_lines[-1], :]
-    cand_v = np.where((sub < 120).sum(axis=0) > int((h_lines[-1] - h_lines[0]) * 0.8))[0]
-    v_groups = []
-    for idx in cand_v:
-        if not v_groups or idx > v_groups[-1][-1] + 6:
-            v_groups.append([idx])
-        else:
-            v_groups[-1].append(idx)
-    v_lines = [int(np.mean(g)) for g in v_groups if len(g) >= 1]
-    v_lines = [x for x in v_lines if int(w * 0.02) < x < int(w * 0.99)]
+        # Vertikale Linien für Style 1
+        sub = arr[h_lines[0]:h_lines[-1], :]
+        cand_v = np.where((sub < 120).sum(axis=0) > int((h_lines[-1] - h_lines[0]) * 0.6))[0]
+        v_groups = []
+        for idx in cand_v:
+            if not v_groups or idx > v_groups[-1][-1] + 6:
+                v_groups.append([idx])
+            else:
+                v_groups[-1].append(idx)
+        v_lines = [int(np.mean(g)) for g in v_groups if len(g) >= 1]
+        v_lines = [x for x in v_lines if int(w * 0.02) < x < int(w * 0.99)]
 
-    if len(v_lines) != 7:
-        v_lines = [int(w * r) for r in [0.0405, 0.1411, 0.3125, 0.4805, 0.6377, 0.8047, 0.9663]]
+        if len(v_lines) != 7:
+            v_lines = [int(w * r) for r in [0.0405, 0.1411, 0.3125, 0.4805, 0.6377, 0.8047, 0.9663]]
+
+        return h_lines, v_lines
+
+    # Style 2 (Modern / Pastell):
+    # Bei Style 2 gibt es keine harten schwarzen Linien, sondern Pastellfarben und runde Icons.
+    # Col 0 ist breiter (~0.1762) wegen der runden Icons.
+    h_lines = [int(h * r) for r in [0.1993, 0.2526, 0.3730, 0.5255, 0.6781, 0.7635, 0.8555]]
+    v_lines = [int(w * r) for r in [0.0404, 0.1762, 0.3275, 0.4860, 0.6440, 0.8021, 0.9601]]
 
     return h_lines, v_lines
 
@@ -530,59 +555,125 @@ def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, st
 
 
 def detect_diet_badge(cell_crop: Image.Image) -> str:
-    """Erkennt das runde braune Vegan- oder Vegetarisch-Siegel."""
+    """Erkennt runde Vegan- oder Vegetarisch-Siegel (Style 1 braunes Siegel oder Style 2 grün/orange Icons)."""
     w, h = cell_crop.size
     if w < 60 or h < 60:
         return ""
+
     corner = cell_crop.crop((max(0, w - 85), max(0, h - 85), w, h))
     arr = np.array(corner.convert("RGB"))
+
+    # Style 2: Grüner Kreis (Vegetarisch)
+    green_mask = (arr[:, :, 0] >= 50) & (arr[:, :, 0] <= 125) & \
+                 (arr[:, :, 1] >= 105) & (arr[:, :, 1] <= 175) & \
+                 (arr[:, :, 2] <= 45)
+    if green_mask.sum() > 300:
+        return "Vegetarisch"
+
+    # Style 2: Oranger Kreis (Vegan)
+    orange_mask = (arr[:, :, 0] > 200) & \
+                  (arr[:, :, 1] > 70)  & (arr[:, :, 1] < 150) & \
+                  (arr[:, :, 2] < 50)
+    if orange_mask.sum() > 300:
+        return "Vegan"
+
+    # Style 1: Runder brauner Kreis mit weißem Text ("Vegan" / "Vegetarisch")
     brown_mask = (arr[:, :, 0] > 115) & (arr[:, :, 0] < 210) & \
                  (arr[:, :, 1] > 95)  & (arr[:, :, 1] < 190) & \
                  (arr[:, :, 2] > 75)  & (arr[:, :, 2] < 170)
-    if brown_mask.sum() < 250:
-        return ""
+    if brown_mask.sum() >= 250:
+        up = corner.resize((corner.width * 3, corner.height * 3), Image.Resampling.LANCZOS).convert("L")
+        ocr_corner = run_tesseract(up.point(lambda p: 0 if p < 115 else 255), psm=6).lower()
+        if re.search(r"v[a-z\.\s]{1,4}an|vecan|vegan|vican|egan", ocr_corner):
+            return "Vegan"
+        return "Vegetarisch"
 
-    up = corner.resize((corner.width * 3, corner.height * 3), Image.Resampling.LANCZOS).convert("L")
-    ocr_corner = run_tesseract(up.point(lambda p: 0 if p < 115 else 255), psm=6).lower()
-    if re.search(r"v[a-z\.\s]{1,4}an|vecan|vegan|vican|egan", ocr_corner):
-        return "Vegan"
-    return "Vegetarisch"
+    return ""
+
+
+def is_allergen_line(line: str) -> bool:
+    """Prüft, ob eine Zeile ausschließlich aus Allergen-Kennzeichnungen besteht."""
+    if re.search(r"k(?:c|e|ec)?al", line, re.I):
+        return False
+    clean_line = re.sub(r"^[\s\.\*\+\-\|©®»«“”\"\'„‘]+|[\s\.\*\+\-\|©®»«“”\"\'„‘]+$", "", line).strip()
+    if not clean_line or len(clean_line) > 35:
+        return False
+
+    tokens = [t.strip(" .,-/*") for t in re.split(r"[,/|\s\.]+", clean_line) if t.strip(" .,-/*")]
+    if not tokens:
+        return False
+
+    for t in tokens:
+        if len(t) >= 3 and not t.isupper() and not t.isdigit():
+            return False
+        if not re.match(r"^(?:[0-9]{1,2}|[A-Z]{1,2})$", t):
+            return False
+
+    return True
 
 
 def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
-    """Trennt Gerichtsname, Kalorien und Allergen-Codes."""
+    """Trennt Gerichtsname, Kalorien und Allergen-Codes und bereinigt OCR-Artefakte."""
     norm = normalize_ocr_text(raw_text)
     lines = [l.strip() for l in norm.split("\n") if l.strip()]
-    dish_lines, calories, allergens = [], "", ""
+    dish_lines, calories = [], ""
+    allergen_parts = []
 
     for line in lines:
-        if re.search(r"\b\d+\s*k(?:c|e|ec)?al(?:\*+)?", line, re.I):
-            calories = line
-        elif re.match(r"^[0-9,\s\.\*\+\-\|KAPGVFSCO_]+$", line) and len(line) <= 15:
-            allergens = line
-        elif line.lower() in ["vegan", "vegetarisch"] or (len(line) <= 2 and line in ["‘", "’", "'", ".", ","]):
+        cal_match = re.search(r"(\d+\s*k(?:c|e|ec)?al(?:\*+)?)", line, re.I)
+        if cal_match:
+            calories = cal_match.group(1).strip()
+            # Text vor der Kalorienangabe behalten, falls vorhanden
+            prefix = line[:cal_match.start()].strip()
+            if prefix and not is_allergen_line(prefix):
+                cleaned_pre = re.sub(r"[\s\|]+(?:u\s*)?[©®»«“”\"]+\s*$", "", prefix).strip()
+                cleaned_pre = re.sub(r"^[\s\/\|\*]+\s*", "", cleaned_pre).strip()
+                if cleaned_pre:
+                    dish_lines.append(cleaned_pre)
+        elif is_allergen_line(line):
+            clean_alg = re.sub(r"^[\s\.\*\+\-\|©®»«“”\"\'„‘]+|[\s\.\*\+\-\|©®»«“”\"\'„‘]+$", "", line).strip()
+            if clean_alg:
+                allergen_parts.append(clean_alg)
+        elif line.lower() in ["vegan", "vegetarisch"] or re.match(r"^[\s\.\,\'\"\‘\’\“\”\©\®\»\«\-\|\/uX]+$", line):
             continue
         else:
-            dish_lines.append(line)
+            # Trailing OCR-Junk wie 'u ©' oder '“©' entfernen
+            cleaned_line = re.sub(r"[\s\|]+(?:u\s*)?[©®»«“”\"]+\s*$", "", line).strip()
+            cleaned_line = re.sub(r"^[\s\/\|\*]+\s*", "", cleaned_line).strip()
+            if cleaned_line:
+                dish_lines.append(cleaned_line)
 
     dish = " | ".join(dish_lines) if dish_lines else (lines[0] if lines else "")
     dish = re.sub(r"\s*\|\s*$", "", re.sub(r"^\s*\|\s*", "", dish))
     dish = fix_dangling_components(dish)
+    allergens = ", ".join(allergen_parts) if allergen_parts else ""
     return dish, calories, allergens
 
 
-def parse_category_cell(raw_text: str) -> Tuple[str, str, str]:
-    """Parst Kategorie und Preise (z.B. Leibspeise 1 / 4,60 € / 7,90 €)."""
-    lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
-    cat_name = lines[0] if lines else "Unbekannt"
+def parse_category_cell(raw_text: str, row_idx: int = 1) -> Tuple[str, str, str]:
+    """Parst Kategorie und Preise konsistent für alle Layout-Stile."""
+    standard_categories = [
+        ("Suppe", "2,80 €", "4,60 €"),
+        ("Leibspeise 1", "4,60 €", "7,90 €"),
+        ("Leibspeise 2", "4,60 €", "7,90 €"),
+        ("Leibspeise 3", "4,60 €", "7,90 €"),
+        ("Salatbar", "4,60 €", "3,00 € / 5,80 €"),
+    ]
+    default_cat, default_ma, default_gaeste = standard_categories[min(max(row_idx - 1, 0), 4)]
 
-    if "leibspeise" in cat_name.lower():
-        return cat_name, "4,60 €", "7,90 €"
-    elif "suppe" in cat_name.lower():
-        return cat_name, "2,80 €", "4,60 €"
-    elif "salatbar" in cat_name.lower():
-        return cat_name, "4,60 €", "3,00 € / 5,80 €"
-    return cat_name, "", ""
+    clean = raw_text.lower()
+    if "suppe" in clean:
+        return "Suppe", "2,80 €", "4,60 €"
+    elif "leibspeise 1" in clean:
+        return "Leibspeise 1", "4,60 €", "7,90 €"
+    elif "leibspeise 2" in clean:
+        return "Leibspeise 2", "4,60 €", "7,90 €"
+    elif "leibspeise 3" in clean:
+        return "Leibspeise 3", "4,60 €", "7,90 €"
+    elif "salat" in clean:
+        return "Salatbar", "4,60 €", "3,00 € / 5,80 €"
+
+    return default_cat, default_ma, default_gaeste
 
 
 def parse_menu_image(image_path: str) -> WeekMenu:
@@ -595,8 +686,13 @@ def parse_menu_image(image_path: str) -> WeekMenu:
     weekdays_5 = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
     day_dates = {wday: (start_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i, wday in enumerate(weekdays_5)}
 
-    categories = [parse_category_cell(run_tesseract(img.crop((v_lines[0] + 3, h_lines[r] + 3, v_lines[1] - 3, h_lines[r + 1] - 3)), psm=6))
-                  for r in range(1, len(h_lines) - 1)]
+    categories = [
+        parse_category_cell(
+            run_tesseract(img.crop((v_lines[0] + 3, h_lines[r] + 3, v_lines[1] - 3, h_lines[r + 1] - 3)), psm=6),
+            row_idx=r
+        )
+        for r in range(1, len(h_lines) - 1)
+    ]
 
     days = {wday: DayMenu(wochentag=wday, datum=day_dates[wday], dishes=[]) for wday in weekdays_5}
 
