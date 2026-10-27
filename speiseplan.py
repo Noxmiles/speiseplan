@@ -257,12 +257,52 @@ def fix_dangling_components(dish_text: str) -> str:
     return " | ".join(merged)
 
 
+SIDE_SAUCE_PATTERN = re.compile(
+    r"\s+(?<!\bin\s)(?<!\ban\s)(?<!\bmit\s)(?<!\bvom\s)(?<!\bvon\s)(?<!\bin\s\d\s)(?:"
+    r"(?:(?:cremige|feine|leichte|würzige|aromatische)\s+)?(?:[\w\-]+)?(?:soße|so\b|sauce|jus|pesto|dipp?|remoulade|mayo)\b"
+    r"|sauce\s+\w+"
+    r"|frankfurter\s+grüne\s+soße\b"
+    r"|pommes(?:\s+frites)?\b"
+    r"|(?:knusprige|cremige|petersilien|salz|brat)?kartoffel(?:n|püree|wedges|klöße)?\b"
+    r"|(?:butter)?spätzle\b"
+    r"|drillinge\b"
+    r"|(?:basmati|wild|spanischer\s+gewürz)?reis\b"
+    r"|(?:orientalischer\s+)?couscous\b"
+    r"|schmorzwiebel\w*"
+    r"|spiegelei\b"
+    r"|rahmspinat\b"
+    r"|frühlingsröllchen\b"
+    r"|(?:knackiger\s+bunter\s+)?salat\b"
+    r"|(?:harissa-)?süßkartoffel\w*"
+    r"|(?:paniertes\s+)?chicken(?:filet)?\b"
+    r"|wokgemüse\b"
+    r"|mediterranes\s+gemüse\b"
+    r"|geschmolzene\s+tomaten\b"
+    r"|kirschtomaten\b"
+    r"|schinken\s+mozzarella\b"
+    r"|champignons\s+erbsen\b"
+    r"|rote\s+zwiebeln\b"
+    r"|hokkaido-kürbis\b"
+    r"|aromatische\s+gewürze\b"
+    r")",
+    flags=re.I,
+)
+
+
 def get_canonical_dish(dish_text: str) -> str:
-    """Extrahiert die Hauptkomponente eines Gerichts (ohne Füll-Adjektive und abbrechende Satzteile)."""
+    """Extrahiert die Hauptkomponente eines Gerichts (ohne Füll-Adjektive, Beilagen und Saucen)."""
     cleaned = fix_dangling_components(dish_text)
     if not cleaned:
         return ""
-    head = cleaned.split("|")[0].strip()
+    if "|" in cleaned:
+        head = cleaned.split("|")[0].strip()
+    else:
+        m = SIDE_SAUCE_PATTERN.search(cleaned)
+        if m and m.start() > 3:
+            head = cleaned[:m.start()].strip()
+        else:
+            head = cleaned.strip()
+
     head = re.sub(r"^[\"\'„“»«\s]+|[\"\'„“»«\s]+$", "", head)
     orig_head = head
     prev = None
@@ -270,6 +310,7 @@ def get_canonical_dish(dish_text: str) -> str:
         prev = head
         head = DEC_PATTERN.sub("", head).strip()
     head = re.sub(r"[\"\'„“»«]", "", head).strip()
+    head = re.sub(r"\s+\b(?:vom|von|in|an|auf|mit|nach|aus|im|bei|oder|und)\b\s*$", "", head, flags=re.I).strip()
     return head if head else orig_head
 
 
