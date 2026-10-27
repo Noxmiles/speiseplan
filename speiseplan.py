@@ -1265,6 +1265,9 @@ class RatingManager:
             else:
                 return {"open": False, "reason": "not_yet"}
 
+        if dish_date > today_date:
+            return {"open": False, "reason": "future"}
+
         yesterday = now - timedelta(days=1)
         yesterday_date = yesterday.strftime("%Y-%m-%d")
 
@@ -1300,8 +1303,15 @@ class RatingManager:
 
         time_check = self.is_rating_open(dish_date, current_dt)
         if not time_check["open"]:
+            if time_check["reason"] == "future":
+                w_map = {1: "Montag", 2: "Dienstag", 3: "Mittwoch", 4: "Donnerstag", 5: "Freitag", 6: "Samstag", 7: "Sonntag"}
+                try:
+                    w_day = w_map.get(datetime.strptime(dish_date, "%Y-%m-%d").isoweekday(), "dem Tag")
+                except Exception:
+                    w_day = "dem Tag"
+                return {"success": False, "error": f"Bewertungen sind erst ab {w_day} um 11:30 Uhr möglich."}
             msg = (
-                "Bewertungen für heute sind erst ab 11:30 Uhr möglich."
+                "Bewertung ab 11:30 Uhr."
                 if time_check["reason"] == "not_yet"
                 else "Das Zeitfenster für Bewertungen dieses Gerichts ist abgelaufen."
             )
