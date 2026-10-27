@@ -668,6 +668,30 @@ def is_allergen_line(line: str) -> bool:
     return True
 
 
+def clean_dish_title(text: str) -> str:
+    """Bereinigt den Gerichtstitel von trailing Allergen-Codes, Fußnoten (z.B. 147, 4,.11,13), OCR-Artefakten (®©) und Bindestrichen."""
+    s = text.strip()
+    s = re.sub(r"(\w+)-\s+(\w+)", r"\1 \2", s)
+    prev = None
+    while prev != s:
+        prev = s
+        # 1. Trailing OCR symbols / badges / quotes e.g. ®©, *, etc.
+        s = re.sub(r"[\s,\.\-]+[©®»«“”\"\'„‘\*\#\+]+$", "", s).strip()
+        # 2. Trailing parenthesized footnotes e.g. (a, c, g), (1, 4, 7), ( a )
+        s = re.sub(r"\s*\([a-z0-9\s,\.\/\*\+\-]+\)\s*$", "", s, flags=re.I).strip()
+        # 3. Trailing orphaned closing paren e.g. 'a )' or '1 )'
+        s = re.sub(r"\s+[a-z0-9]{1,3}\s*\)\s*$", "", s, flags=re.I).strip()
+        # 4. Trailing comma/space-separated footnote lists like ', 4,.11,13 ®©' or ', 1, 4, 7' or ' a, c'
+        s = re.sub(r"[\s,]+(?:[0-9]{1,3}|[a-z]{1,2})(?:[\s,\.]+(?:[0-9]{1,3}|[a-z]{1,2}))+[\s©®»«“”\"\'„‘\.\,]*$", "", s, flags=re.I).strip()
+        # 5. Trailing footnote numbers (like ' 147' or ' 12' or ', 1')
+        s = re.sub(r"(?:,\s*[0-9]{1,4}|\s+[0-9]{1,4})\s*$", "", s).strip()
+        # 6. Trailing single letter footnote like ' a' or ', a'
+        s = re.sub(r"(?:,\s*[a-zA-Z]|\s+[a-zA-Z])\s*$", "", s).strip()
+        # 7. Strip trailing commas, periods, dashes, quotes, slashes
+        s = re.sub(r"[\s,\.\-\|\/]+$", "", s).strip()
+    return s
+
+
 def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
     """Trennt Gerichtsname, Kalorien und Allergen-Codes und bereinigt OCR-Artefakte."""
     norm = normalize_ocr_text(raw_text)
@@ -722,7 +746,9 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
         dish = lines[0] if lines else ""
 
     dish = dish.replace("|", " ")
+    dish = clean_dish_title(dish)
     dish = re.sub(r"\s+", " ", dish).strip()
+    calories = re.sub(r"[\s©®]+$", "", calories).strip()
     allergens = ", ".join(allergen_parts) if allergen_parts else ""
     return dish, calories, allergens
 
