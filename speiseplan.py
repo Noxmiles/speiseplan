@@ -32,6 +32,7 @@ import io
 import json
 import shutil
 import subprocess
+import hashlib
 import argparse
 import functools
 import urllib.request
@@ -59,6 +60,7 @@ DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
 ARCHIVE_CSV = os.path.join(DATA_DIR, "archive.csv")
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
+RATINGS_FILE = os.path.join(DATA_DIR, "ratings.json")
 
 DEFAULT_URL = "https://kaiberg-kitchen.de/"
 DEFAULT_CANTEEN = "HessenTreff"
@@ -1194,6 +1196,198 @@ def generate_demo_archive(num_weeks: int = 20) -> List[Dish]:
             dishes.append(Dish(kw=kw, jahr=year, datum=dt, wochentag=wday, kategorie="Salatbar",
                                gericht="Salatbar", preis_mitarbeiter="4,60 €", preis_gaeste="3,00 € / 5,80 €"))
     return dishes
+
+
+class RatingManager:
+    """Verwaltet Community-Bewertungen (1-5 Sterne), Zeitfenster und Limits."""
+
+    def __init__(self, filepath: str = RATINGS_FILE):
+        self.filepath = filepath
+        os.makedirs(os.path.dirname(os.path.abspath(self.filepath)), exist_ok=True)
+        if not os.path.exists(self.filepath):
+            self.save_data({"ratings": [], "device_votes": {}})
+
+    def load_data(self) -> Dict[str, Any]:
+        try:
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if isinstance(d, dict):
+                    if "ratings" not in d or not isinstance(d["ratings"], list):
+                        d["ratings"] = []
+                    if "device_votes" not in d or not isinstance(d["device_votes"], dict):
+                        d["device_votes"] = {}
+                    return d
+        except Exception:
+            pass
+        return {"ratings": [], "device_votes": {}}
+
+    def save_data(self, data: Dict[str, Any]) -> bool:
+        try:
+            with open(self.filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def hash_device_token(token: str, user_agent: str = "") -> str:
+        s = f"{token.strip()}|{user_agent.strip()}"
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def normalize_category_type(kategorie: str) -> Optional[str]:
+        cat = kategorie.strip().lower()
+        if "salat" in cat or "dessert" in cat or "buffet" in cat:
+            return None
+        if "suppe" in cat:
+            return "suppe"
+        return "hauptgericht"
+
+    @staticmethod
+    def is_rating_open(dish_date: str, current_dt: Optional[datetime] = None) -> Dict[str, Any]:
+        if current_dt is None:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo("Europe/Berlin")
+                now = datetime.now(tz)
+            except Exception:
+                now = datetime.now()
+        else:
+            now = current_dt
+
+        today_date = now.strftime("%Y-%m-%d")
+        current_time = now.strftime("%H:%M")
+        day_of_week = now.isoweekday()  # 1 = Monday, 7 = Sunday
+
+        if dish_date == today_date:
+            if current_time >= "11:30":
+                return {"open": True, "reason": "open"}
+            else:
+                return {"open": False, "reason": "not_yet"}
+
+        yesterday = now - timedelta(days=1)
+        yesterday_date = yesterday.strftime("%Y-%m-%d")
+
+        if dish_date == yesterday_date:
+            if day_of_week == 1:
+                return {"open": False, "reason": "expired"}
+            if current_time < "11:30":
+                return {"open": True, "reason": "open"}
+            else:
+                return {"open": False, "reason": "expired"}
+
+        return {"open": False, "reason": "expired"}
+
+    def get_user_vote(self, dish_date: str, category_type: str, device_hash: str) -> Optional[Dict[str, Any]]:
+        data = self.load_data()
+        return data.get("device_votes", {}).get(device_hash, {}).get(dish_date, {}).get(category_type)
+
+    def add_rating(
+        self,
+        dish_date: str,
+        kategorie: str,
+        dish_title: str,
+        stars: int,
+        device_hash: str,
+        current_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        if stars < 1 or stars > 5:
+            return {"success": False, "error": "Ungültige Sterne-Bewertung (1-5)."}
+
+        cat_type = self.normalize_category_type(kategorie)
+        if cat_type is None:
+            return {"success": False, "error": "Diese Kategorie kann nicht bewertet werden."}
+
+        time_check = self.is_rating_open(dish_date, current_dt)
+        if not time_check["open"]:
+            msg = (
+                "Bewertungen für heute sind erst ab 11:30 Uhr möglich."
+                if time_check["reason"] == "not_yet"
+                else "Das Zeitfenster für Bewertungen dieses Gerichts ist abgelaufen."
+            )
+            return {"success": False, "error": msg}
+
+        data = self.load_data()
+        if cat_type in data.get("device_votes", {}).get(device_hash, {}).get(dish_date, {}):
+            label = "eine Suppe" if cat_type == "suppe" else "ein Hauptgericht"
+            return {"success": False, "error": f"Du hast für diesen Tag bereits {label} bewertet."}
+
+        canonical = get_canonical_dish(dish_title)
+        now_iso = (current_dt or datetime.now()).isoformat()
+        rating_id = f"rat_{hashlib.md5(f'{device_hash}_{dish_date}_{cat_type}_{now_iso}'.encode()).hexdigest()[:12]}"
+
+        entry = {
+            "id": rating_id,
+            "device_hash": device_hash,
+            "datum": dish_date,
+            "kategorie_typ": cat_type,
+            "dish_raw": dish_title,
+            "dish_canonical": canonical,
+            "stars": stars,
+            "created_at": now_iso,
+        }
+
+        data["ratings"].append(entry)
+        data.setdefault("device_votes", {}).setdefault(device_hash, {}).setdefault(dish_date, {})[cat_type] = {
+            "stars": stars,
+            "dish_canonical": canonical,
+            "dish_raw": dish_title,
+            "created_at": now_iso,
+        }
+
+        self.save_data(data)
+        summary = self.get_dish_summary(dish_title, canonical, data)
+        return {
+            "success": True,
+            "stars": stars,
+            "dish_canonical": canonical,
+            "summary": summary,
+        }
+
+    def get_dish_summary(
+        self, dish_title: str, canonical: Optional[str] = None, data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if data is None:
+            data = self.load_data()
+        if canonical is None:
+            canonical = get_canonical_dish(dish_title)
+
+        matching_stars = [
+            int(r["stars"])
+            for r in data.get("ratings", [])
+            if r.get("dish_canonical") == canonical or r.get("dish_raw") == dish_title
+        ]
+        count = len(matching_stars)
+        if count == 0:
+            return {"avg": 0.0, "count": 0, "formatted": "–"}
+        avg = round(sum(matching_stars) / count, 1)
+        return {"avg": avg, "count": count, "formatted": f"{avg:.1f}".replace(".", ",")}
+
+    def get_all_summaries(self) -> Dict[str, Dict[str, Any]]:
+        data = self.load_data()
+        grouped: Dict[str, List[int]] = {}
+        for r in data.get("ratings", []):
+            canon = r.get("dish_canonical") or r.get("dish_raw") or ""
+            if not canon:
+                continue
+            grouped.setdefault(canon, []).append(int(r.get("stars", 0)))
+
+        summaries = {}
+        for dish, stars_list in grouped.items():
+            cnt = len(stars_list)
+            avg = round(sum(stars_list) / cnt, 1)
+            summaries[dish] = {"avg": avg, "count": cnt, "formatted": f"{avg:.1f}".replace(".", ",")}
+        return summaries
+
+    def get_top_rated_dishes(self, min_votes: int = 1, limit: int = 10) -> List[Dict[str, Any]]:
+        summaries = self.get_all_summaries()
+        filtered = [
+            {"dish": dish, "avg": info["avg"], "count": info["count"], "formatted": info["formatted"]}
+            for dish, info in summaries.items()
+            if info["count"] >= min_votes
+        ]
+        filtered.sort(key=lambda x: (x["avg"], x["count"]), reverse=True)
+        return filtered[:limit]
 
 
 # ==============================================================================
