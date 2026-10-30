@@ -1349,7 +1349,8 @@ class RatingManager:
             return {"success": False, "error": f"Du hast für diesen Tag bereits {label} bewertet."}
 
         canonical = get_canonical_dish(dish_title)
-        now_iso = (current_dt or datetime.now()).isoformat()
+        now_dt = current_dt or datetime.now()
+        now_iso = now_dt.isoformat()
         rating_id = f"rat_{hashlib.md5(f'{device_hash}_{dish_date}_{cat_type}_{now_iso}'.encode()).hexdigest()[:12]}"
 
         entry = {
@@ -1376,6 +1377,69 @@ class RatingManager:
         return {
             "success": True,
             "stars": stars,
+            "dish_canonical": canonical,
+            "summary": summary,
+        }
+
+    def undo_rating(
+        self,
+        dish_date: str,
+        kategorie: str,
+        dish_title: str,
+        device_hash: str,
+        current_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        cat_type = self.normalize_category_type(kategorie)
+        if cat_type is None:
+            return {"success": False, "error": "Ungültige Kategorie."}
+
+        data = self.load_data()
+        existing = data.get("device_votes", {}).get(device_hash, {}).get(dish_date, {}).get(cat_type)
+        if not existing:
+            return {"success": False, "error": "Keine Wertung zum Zurückziehen gefunden."}
+
+        now_dt = current_dt or datetime.now()
+        created_at_str = existing.get("created_at")
+        age_seconds = 9999
+        if created_at_str:
+            try:
+                prev_dt = datetime.fromisoformat(created_at_str)
+                age_seconds = (now_dt - prev_dt).total_seconds()
+            except Exception:
+                pass
+
+        # 8-Sekunden-Undo-Fenster (mit 3s Kulanz für Netzlaufzeit)
+        if age_seconds > 11:
+            return {"success": False, "error": "Das 8-Sekunden-Zeitfenster zum Zurückziehen ist abgelaufen."}
+
+        # Wertung aus ratings entfernen
+        data["ratings"] = [
+            r for r in data.get("ratings", [])
+            if not (
+                r.get("device_hash") == device_hash
+                and r.get("datum") == dish_date
+                and r.get("kategorie_typ") == cat_type
+            )
+        ]
+
+        # Wertung aus device_votes entfernen
+        if (
+            device_hash in data.get("device_votes", {})
+            and dish_date in data["device_votes"][device_hash]
+            and cat_type in data["device_votes"][device_hash][dish_date]
+        ):
+            del data["device_votes"][device_hash][dish_date][cat_type]
+            if not data["device_votes"][device_hash][dish_date]:
+                del data["device_votes"][device_hash][dish_date]
+            if not data["device_votes"][device_hash]:
+                del data["device_votes"][device_hash]
+
+        self.save_data(data)
+        canonical = get_canonical_dish(dish_title)
+        summary = self.get_dish_summary(dish_title, canonical, data)
+        return {
+            "success": True,
+            "undone": True,
             "dish_canonical": canonical,
             "summary": summary,
         }
