@@ -1297,8 +1297,19 @@ class RatingManager:
         yesterday = now - timedelta(days=1)
         yesterday_date = yesterday.strftime("%Y-%m-%d")
 
+        # Fall 3: Gestriges Gericht (Gestern ganztägig bewertbar, auch nach 11:30)
         if dish_date == yesterday_date:
             if day_of_week == 1:
+                return {"open": False, "reason": "expired"}
+            return {"open": True, "reason": "open"}
+
+        # Fall 4: Vorgestriges Gericht (2 Tage her: bis heute 11:29:59 bewertbar)
+        before_yesterday = now - timedelta(days=2)
+        before_yesterday_date = before_yesterday.strftime("%Y-%m-%d")
+
+        if dish_date == before_yesterday_date:
+            if day_of_week in (1, 2):
+                # Montag/Dienstag: Vorgestern war Samstag/Sonntag
                 return {"open": False, "reason": "expired"}
             if current_time < "11:30":
                 return {"open": True, "reason": "open"}
