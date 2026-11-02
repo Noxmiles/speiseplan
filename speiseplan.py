@@ -260,32 +260,38 @@ def fix_dangling_components(dish_text: str) -> str:
 
 
 SIDE_SAUCE_PATTERN = re.compile(
-    r"\s+(?<!\bin\s)(?<!\ban\s)(?<!\bmit\s)(?<!\bvom\s)(?<!\bvon\s)(?<!\bin\s\d\s)(?:"
-    r"(?:(?:cremige|feine|leichte|würzige|aromatische)\s+)?(?:[\w\-]+)?(?:soße|so\b|sauce|jus|pesto|dipp?|remoulade|mayo)\b"
-    r"|sauce\s+\w+"
-    r"|frankfurter\s+grüne\s+soße\b"
-    r"|pommes(?:\s+frites)?\b"
-    r"|(?:knusprige|cremige|petersilien|salz|brat)?kartoffel(?:n|püree|wedges|klöße)?\b"
+    r"\b(?:"
+    r"pommes(?:\s+frites)?\b"
+    r"|steakhouse-pommes\b"
+    r"|kartoffelstäbchen\b"
+    r"|(?:knusprige|cremige|petersilien|salz|brat)?kartoffel(?:n|püree|wedges|klöße|gratin)?\b"
     r"|(?:butter)?spätzle\b"
     r"|drillinge\b"
     r"|(?:basmati|wild|spanischer\s+gewürz)?reis\b"
     r"|(?:orientalischer\s+)?couscous\b"
-    r"|schmorzwiebel\w*"
-    r"|spiegelei\b"
-    r"|rahmspinat\b"
-    r"|frühlingsröllchen\b"
-    r"|(?:knackiger\s+bunter\s+)?salat\b"
-    r"|(?:harissa-)?süßkartoffel\w*"
-    r"|(?:paniertes\s+)?chicken(?:filet)?\b"
+    r"|kräuterquark\b"
+    r"|brokkoli\b"
+    r"|rotkohl\b"
+    r"|buttergemüse\b"
     r"|wokgemüse\b"
     r"|mediterranes\s+gemüse\b"
     r"|geschmolzene\s+tomaten\b"
     r"|kirschtomaten\b"
+    r"|schmorzwiebel\w*"
+    r"|spiegelei\b"
+    r"|rahmspinat\b"
+    r"|frühlingsröllchen\b"
+    r"|frische\s+kräuter\b"
+    r"|(?:knackiger\s+bunter\s+)?salat\b"
+    r"|(?:harissa-)?süßkartoffel\w*"
     r"|schinken\s+mozzarella\b"
     r"|champignons\s+erbsen\b"
     r"|rote\s+zwiebeln\b"
     r"|hokkaido-kürbis\b"
     r"|aromatische\s+gewürze\b"
+    r"|sauce\s+\w+"
+    r"|frankfurter\s+grüne\s+soße\b"
+    r"|(?:(?:cremige|feine|leichte|würzige|aromatische|toskanische)\s+)?(?:[\w\-]+)?(?:soße|sauce|jus|pesto|dipp?|remoulade|mayo)\b"
     r")",
     flags=re.I,
 )
@@ -299,11 +305,18 @@ def get_canonical_dish(dish_text: str) -> str:
     if "|" in cleaned:
         head = cleaned.split("|")[0].strip()
     else:
-        m = SIDE_SAUCE_PATTERN.search(cleaned)
-        if m and m.start() > 3:
-            head = cleaned[:m.start()].strip()
-        else:
-            head = cleaned.strip()
+        head = cleaned
+        for m in SIDE_SAUCE_PATTERN.finditer(cleaned):
+            start = m.start()
+            if start <= 3:
+                continue
+            prefix = cleaned[:start].rstrip()
+            # Falls vor dem Treffer eine Präposition wie in/auf/an/mit steht, gehört die Zutat zum Gerichtstitel
+            # z.B. 'Gekochte Eier in feiner Senfsauce' oder 'Spinatknödel auf Pilzragout'
+            if re.search(r"\b(?:in|an|auf|mit|von|vom|aus)\s+(?:feine[rm]?|cremige[rm]?|würzige[rm]?|leichte[rm]?|aromatische[rm]?|toskanische[rm]?)?$", prefix, flags=re.I):
+                continue
+            head = prefix
+            break
 
     head = re.sub(r"^[\"\'„“»«\s]+|[\"\'„“»«\s]+$", "", head)
     orig_head = head
@@ -312,7 +325,20 @@ def get_canonical_dish(dish_text: str) -> str:
         prev = head
         head = DEC_PATTERN.sub("", head).strip()
     head = re.sub(r"[\"\'„“»«]", "", head).strip()
-    head = re.sub(r"\s+\b(?:vom|von|in|an|auf|mit|nach|aus|im|bei|oder|und)\b\s*$", "", head, flags=re.I).strip()
+
+    # Nachlaufende Präpositionen und unvollständige Adjektive bereinigen (z.B. 'in feiner', 'toskanische')
+    dangling_pattern = re.compile(
+        r"\s+\b(?:"
+        r"in|an|auf|mit|vom|von|aus|nach|bei|im|oder|und"
+        r"|(?:fein|cremig|würzig|leicht|toskanisch|aromatisch|hausgemacht|frisch|bunt)(?:e[srmn]?|er)?"
+        r")\b\s*$",
+        flags=re.I
+    )
+    prev = None
+    while prev != head:
+        prev = head
+        head = dangling_pattern.sub("", head).strip()
+
     return head if head else orig_head
 
 
@@ -1097,8 +1123,9 @@ class CanteenAnalytics:
         diet_counter = Counter(d.eigenschaften if d.eigenschaften else "Fleisch / Klassisch" for d in self.dishes)
 
         filtered = [get_canonical_dish(d.gericht) for d in self.dishes if d.gericht.lower() not in ["salatbar", "tagesgericht", ""]]
-        top_dishes = Counter(filtered).most_common(5)
         counts = Counter(filtered)
+        # Klassiker müssen mindestens 2x serviert worden sein:
+        top_dishes = [(dish, cnt) for dish, cnt in counts.most_common(10) if cnt >= 2]
 
         # Durchschnittspreis NUR für echte Hauptgerichte (Leibspeisen)
         prices_ma = [float(re.search(r"(\d+[,.]\d{2})", d.preis_mitarbeiter).group(1).replace(",", "."))
