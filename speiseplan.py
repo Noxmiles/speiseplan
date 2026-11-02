@@ -525,53 +525,98 @@ def run_tesseract(crop: Image.Image, psm: int = 6) -> str:
 
 
 def detect_grid(image: Image.Image) -> Tuple[List[int], List[int]]:
-    """Ermittelt die 7 horizontalen und vertikalen Trennlinien des Tabellenrasters.
-    Unterstützt sowohl Style 1 (klassisches Raster mit dunklen Trennlinien)
-    als auch Style 2 (modernes Pastell-/Farb-Design ohne harte schwarze Linien).
+    """Ermittelt dynamisch die 7 horizontalen und vertikalen Trennlinien des modernen Speiseplan-Rasters.
+    Passt sich automatisch an variierende Bildauflösungen, Beschnittränder und manuelle Snipping-Ausschnitte an.
     """
-    gray = image.convert("L")
-    arr = np.array(gray)
-    h, w = arr.shape
+    rgb = image.convert("RGB")
+    arr = np.array(rgb)
+    h, w, _ = arr.shape
 
-    # Horizontale Linien (dunkle Pixel < 120)
-    cand_h = np.where((arr < 120).sum(axis=1) > int(w * 0.35))[0]
-    h_groups = []
-    for idx in cand_h:
-        if not h_groups or idx > h_groups[-1][-1] + 6:
-            h_groups.append([idx])
+    # 1. Spalten ermitteln:
+    # Im vertikalen Tabellenkörper (25% bis 85% der Höhe) besitzen Trennlinien eine sehr geringe Varianz.
+    body = arr[int(h * 0.25):int(h * 0.85), :]
+    v_stds = np.std(body, axis=0).mean(axis=1)
+    v_means = np.mean(body, axis=0)
+
+    cand_v = []
+    for x in range(int(w * 0.02), int(w * 0.98)):
+        if v_stds[x] < 3.0 and (v_means[x] < 240).any():
+            cand_v.append(x)
+
+    v_groups = []
+    for x in cand_v:
+        if not v_groups or x > v_groups[-1][-1] + 5:
+            v_groups.append([x])
         else:
-            h_groups[-1].append(idx)
-    h_lines = [int(np.mean(g)) for g in h_groups if len(g) >= 1]
-    h_lines = [y for y in h_lines if int(h * 0.15) < y < int(h * 0.95)]
+            v_groups[-1].append(x)
 
-    # Style 1: Wenn ca. 5 bis 8 dunkle horizontale Linien gefunden wurden
-    if len(h_lines) >= 5:
-        if len(h_lines) != 7:
-            h_lines = [int(h * r) for r in [0.1966, 0.2371, 0.3298, 0.4895, 0.6722, 0.7873, 0.8696]]
+    v_lines_raw = [int(np.mean(g)) for g in v_groups]
+    left_edge = min([x for x in v_lines_raw if x < w * 0.10], default=int(w * 0.04))
+    col0_right = min([x for x in v_lines_raw if int(w * 0.12) <= x <= int(w * 0.22)], default=int(w * 0.16))
+    right_edge = max([x for x in v_lines_raw if x > w * 0.90], default=int(w * 0.96))
 
-        # Vertikale Linien für Style 1
-        sub = arr[h_lines[0]:h_lines[-1], :]
-        cand_v = np.where((sub < 120).sum(axis=0) > int((h_lines[-1] - h_lines[0]) * 0.6))[0]
-        v_groups = []
-        for idx in cand_v:
-            if not v_groups or idx > v_groups[-1][-1] + 6:
-                v_groups.append([idx])
-            else:
-                v_groups[-1].append(idx)
-        v_lines = [int(np.mean(g)) for g in v_groups if len(g) >= 1]
-        v_lines = [x for x in v_lines if int(w * 0.02) < x < int(w * 0.99)]
+    # Die 5 Wochentage teilen sich den Raum zwischen Spalte 0 und rechtem Rand exakt gleichmäßig:
+    day_col_width = (right_edge - col0_right) / 5.0
+    v_lines = [left_edge, col0_right] + [int(col0_right + i * day_col_width) for i in range(1, 6)]
 
-        if len(v_lines) != 7:
-            v_lines = [int(w * r) for r in [0.0405, 0.1411, 0.3125, 0.4805, 0.6377, 0.8047, 0.9663]]
+    # 2. Header-Balken (KW & Wochentage) auffinden:
+    table_slice = arr[:, int(col0_right + 20):int(right_edge - 20)]
+    row_means = np.mean(table_slice, axis=(1, 2))
 
-        return h_lines, v_lines
+    header_top = None
+    header_bottom = None
+    cur_start = None
+    for y in range(int(h * 0.15), int(h * 0.35)):
+        if row_means[y] < 245:
+            if cur_start is None:
+                cur_start = y
+        else:
+            if cur_start is not None:
+                if y - cur_start >= 30:
+                    header_top = cur_start
+                    header_bottom = y
+                    break
+                cur_start = None
 
-    # Style 2 (Modern / Pastell):
-    # Bei Style 2 gibt es keine harten schwarzen Linien, sondern Pastellfarben und runde Icons.
-    # Col 0 ist breiter (~0.1762) wegen der runden Icons.
-    h_lines = [int(h * r) for r in [0.1993, 0.2526, 0.3730, 0.5255, 0.6781, 0.7635, 0.8555]]
-    v_lines = [int(w * r) for r in [0.0404, 0.1762, 0.3275, 0.4860, 0.6440, 0.8021, 0.9601]]
+    if header_top is None:
+        header_top = int(h * 0.20)
+    if header_bottom is None:
+        header_bottom = int(header_top + h * 0.055)
 
+    # 3. Horizontale Trennlinien zwischen den Gericht-Zeilen ermitteln:
+    h_stds = np.std(table_slice, axis=1).mean(axis=1)
+    cand_h = []
+    for y in range(header_bottom + 15, int(h * 0.95)):
+        if h_stds[y] < 8.0 and row_means[y] < 248:
+            cand_h.append(y)
+
+    h_groups = []
+    for y in cand_h:
+        if not h_groups or y > h_groups[-1][-1] + 8:
+            h_groups.append([y])
+        else:
+            h_groups[-1].append(y)
+
+    raw_dividers = [int(np.mean(g)) for g in h_groups]
+
+    # Mindestabstand von 40px zwischen Zeilentrennern einhalten:
+    dividers = []
+    for d in raw_dividers:
+        if not dividers or d - dividers[-1] >= 40:
+            dividers.append(d)
+
+    if len(dividers) == 5:
+        selected_divs = dividers
+    elif len(dividers) > 5:
+        selected_divs = dividers[:5]
+    else:
+        # Fallback: geometrische Interpolation anhand des Tabellenendes
+        table_bottom = dividers[-1] if dividers else int(h * 0.86)
+        body_h = table_bottom - header_bottom
+        ratios = [0.17, 0.44, 0.71, 0.86, 1.0]
+        selected_divs = [int(header_bottom + body_h * r) for r in ratios]
+
+    h_lines = [header_top, header_bottom] + selected_divs
     return h_lines, v_lines
 
 
@@ -609,7 +654,7 @@ def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, st
 
 
 def detect_diet_badge(cell_crop: Image.Image) -> str:
-    """Erkennt runde Vegan- oder Vegetarisch-Siegel (Style 1 braunes Siegel oder Style 2 grün/orange Icons)."""
+    """Erkennt runde Vegan- oder Vegetarisch-Siegel (grüne und orange Icons im modernen Speiseplan)."""
     w, h = cell_crop.size
     if w < 60 or h < 60:
         return ""
@@ -630,17 +675,6 @@ def detect_diet_badge(cell_crop: Image.Image) -> str:
                   (arr[:, :, 2] < 50)
     if orange_mask.sum() > 300:
         return "Vegan"
-
-    # Style 1: Runder brauner Kreis mit weißem Text ("Vegan" / "Vegetarisch")
-    brown_mask = (arr[:, :, 0] > 115) & (arr[:, :, 0] < 210) & \
-                 (arr[:, :, 1] > 95)  & (arr[:, :, 1] < 190) & \
-                 (arr[:, :, 2] > 75)  & (arr[:, :, 2] < 170)
-    if brown_mask.sum() >= 250:
-        up = corner.resize((corner.width * 3, corner.height * 3), Image.Resampling.LANCZOS).convert("L")
-        ocr_corner = run_tesseract(up.point(lambda p: 0 if p < 115 else 255), psm=6).lower()
-        if re.search(r"v[a-z\.\s]{1,4}an|vecan|vegan|vican|egan", ocr_corner):
-            return "Vegan"
-        return "Vegetarisch"
 
     return ""
 
@@ -806,7 +840,8 @@ def parse_menu_image(image_path: str) -> WeekMenu:
             dish_text, cal, alg = clean_cell_text(raw)
 
             # Generischen Platzhalter 'Tagesgericht' komplett überspringen (kein Mehrwert)
-            if dish_text.strip().lower() == "tagesgericht":
+            norm_dish = re.sub(r"^[\d\s,.*+-]+|[\d\s,.*+-]+$", "", dish_text).strip().lower()
+            if not norm_dish or norm_dish == "tagesgericht":
                 continue
 
             diet = detect_diet_badge(cell)
@@ -839,7 +874,8 @@ def save_week_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> str:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, delimiter=";")
         writer.writeheader()
         for dish in menu.all_dishes():
-            if dish.gericht.strip().lower() == "tagesgericht":
+            norm_g = re.sub(r"^[\d\s,.*+-]+|[\d\s,.*+-]+$", "", dish.gericht).strip().lower()
+            if not norm_g or norm_g == "tagesgericht":
                 continue
             writer.writerow(dish.to_dict())
     return target
@@ -878,7 +914,8 @@ def update_archive_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> int:
             for row in csv.DictReader(f, delimiter=";"):
                 try:
                     d = Dish.from_dict(row)
-                    if d.gericht.strip().lower() == "tagesgericht":
+                    norm_g = re.sub(r"^[\d\s,.*+-]+|[\d\s,.*+-]+$", "", d.gericht).strip().lower()
+                    if not norm_g or norm_g == "tagesgericht":
                         continue
                     norm_cat = re.sub(r"\s+", "", d.kategorie.lower())
                     existing[(d.datum, norm_cat)] = d
@@ -886,7 +923,8 @@ def update_archive_csv(menu: WeekMenu, data_dir: str = DATA_DIR) -> int:
                     pass
 
     for dish in menu.all_dishes():
-        if dish.gericht.strip().lower() == "tagesgericht":
+        norm_g = re.sub(r"^[\d\s,.*+-]+|[\d\s,.*+-]+$", "", dish.gericht).strip().lower()
+        if not norm_g or norm_g == "tagesgericht":
             continue
         norm_cat = re.sub(r"\s+", "", dish.kategorie.lower())
         existing[(dish.datum, norm_cat)] = dish
