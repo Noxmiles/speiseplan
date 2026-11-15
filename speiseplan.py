@@ -32,10 +32,13 @@ import io
 import json
 import shutil
 import subprocess
+import tempfile
 import hashlib
 import argparse
 import functools
 import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any, Optional
 from collections import Counter
@@ -109,6 +112,25 @@ def find_tesseract_binary() -> Optional[str]:
             if os.path.isfile(path):
                 return path
 
+    return None
+
+
+def find_poppler_tool(tool_name: str) -> Optional[str]:
+    """Findet ein Poppler-Hilfsprogramm (z. B. pdftohtml, pdftoppm) im Systempfad."""
+    found = shutil.which(tool_name)
+    if found:
+        return found
+
+    if sys.platform == "win32":
+        exe = f"{tool_name}.exe" if not tool_name.endswith(".exe") else tool_name
+        for base in [
+            r"C:\Program Files\poppler\Library\bin",
+            r"C:\Program Files\poppler\bin",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\poppler\Library\bin"),
+        ]:
+            candidate = os.path.join(base, exe)
+            if os.path.isfile(candidate):
+                return candidate
     return None
 
 
@@ -438,8 +460,120 @@ class WeekMenu:
 # 3. WEB-SCRAPER (KAIBERG KITCHEN)
 # ==============================================================================
 
-def get_menu_image_url(page_url: str = DEFAULT_URL, canteen: str = DEFAULT_CANTEEN) -> str:
-    """Findet auf kaiberg-kitchen.de die Wochenkarte für HessenTreff."""
+def _pick_img_url(img_tag, base_url: str) -> str:
+    """Wählt die höchste Bildauflösung aus srcset oder fallback auf src."""
+    srcset = img_tag.get("srcset")
+    if srcset:
+        parts = [p.strip().split() for p in srcset.split(",") if p.strip()]
+        best = max(
+            parts,
+            key=lambda x: int(re.sub(r"\D", "", x[1])) if len(x) > 1 and re.sub(r"\D", "", x[1]) else 0,
+        )[0]
+        return urllib.parse.urljoin(base_url, best)
+    return urllib.parse.urljoin(base_url, img_tag.get("src", ""))
+
+
+def _is_menu_image(img_tag) -> bool:
+    """Prüft, ob ein <img>-Tag auf eine Wochenkarte bzw. einen Speiseplan verweist."""
+    src = (img_tag.get("src") or "").lower()
+    alt = (img_tag.get("alt") or "").lower()
+    combined = f"{src} {alt}"
+    if any(k in combined for k in ["bildschirmfoto", "wochenkarte", "speiseplan", "-pdf."]):
+        return True
+    fig = img_tag.find_parent("figure")
+    if fig and "wochenkarte" in fig.get_text().lower():
+        return True
+    return False
+
+
+def _extract_menu_candidates_from_soup(
+    soup: "BeautifulSoup", page_url: str, canteen: str
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extrahiert (pdf_url, img_url, standort_url) für die gesuchte Kantine aus dem DOM."""
+    canteen_low = canteen.lower()
+    target_heading = None
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "strong", "p"]):
+        if canteen_low in heading.get_text().lower():
+            target_heading = heading
+            break
+
+    if not target_heading:
+        raise ValueError(f"Kantine '{canteen}' konnte auf {page_url} nicht gefunden werden.")
+
+    all_canteens = ["sevengardens", "seven gardens", "hessentreff", "dow"]
+    other_canteens = [c for c in all_canteens if c not in canteen_low and canteen_low not in c]
+    canteen_token = canteen_low.split()[0]
+
+    pdf_candidates: List[Tuple[int, str]] = []
+    img_candidates: List[str] = []
+    standort_url: Optional[str] = None
+
+    curr = target_heading
+    while curr:
+        curr = curr.next_element
+        if not curr:
+            break
+        tag_name = getattr(curr, "name", None)
+        if tag_name in ["h1", "h2", "h3", "h4", "strong", "p"]:
+            t = curr.get_text().lower()
+            if any(oc in t for oc in other_canteens):
+                break
+        if tag_name == "a":
+            href = (curr.get("href") or "").strip()
+            link_text = curr.get_text(" ", strip=True).lower()
+            if href and ".pdf" in href.lower():
+                full_pdf = urllib.parse.urljoin(page_url, href)
+                score = 0
+                if "wochenkarte" in link_text or "speiseplan" in link_text:
+                    score += 2
+                if canteen_token in full_pdf.lower():
+                    score += 2
+                pdf_candidates.append((score, full_pdf))
+            elif href and not standort_url and ("standort" in link_text or canteen_token in href.lower()):
+                if not href.startswith("#") and ".pdf" not in href.lower():
+                    standort_url = urllib.parse.urljoin(page_url, href)
+        if tag_name == "img" and _is_menu_image(curr):
+            img_candidates.append(_pick_img_url(curr, page_url))
+
+    # Fallback auf übergeordnete Container der Kantine (stoppt vor Container anderer Kantinen)
+    if not pdf_candidates or not img_candidates:
+        node = target_heading
+        for _ in range(6):
+            if not node.parent:
+                break
+            node = node.parent
+            node_text = node.get_text().lower()
+            if any(oc in node_text for oc in other_canteens):
+                break
+            if not pdf_candidates:
+                for a_tag in node.find_all("a", href=True):
+                    if ".pdf" in a_tag["href"].lower():
+                        pdf_candidates.append((1, urllib.parse.urljoin(page_url, a_tag["href"])))
+            if not img_candidates:
+                for fig in node.find_all("figure"):
+                    if "wochenkarte" in fig.get_text().lower():
+                        img = fig.find("img")
+                        if img:
+                            img_candidates.append(_pick_img_url(img, page_url))
+                            break
+                if not img_candidates:
+                    for img in node.find_all("img"):
+                        if _is_menu_image(img):
+                            img_candidates.append(_pick_img_url(img, page_url))
+                            break
+
+    pdf_url = max(pdf_candidates, key=lambda x: x[0])[1] if pdf_candidates else None
+    img_url = img_candidates[0] if img_candidates else None
+    return pdf_url, img_url, standort_url
+
+
+def get_menu_source_url(
+    page_url: str = DEFAULT_URL,
+    canteen: str = DEFAULT_CANTEEN,
+    prefer_pdf: bool = True,
+    _follow_standort: bool = True,
+) -> str:
+    """Findet auf kaiberg-kitchen.de die aktuelle Wochenkarte (PDF bevorzugt, mit Bild-Fallback)."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
 
     if requests and BeautifulSoup:
@@ -447,88 +581,74 @@ def get_menu_image_url(page_url: str = DEFAULT_URL, canteen: str = DEFAULT_CANTE
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
 
-        # Suche nach Überschrift mit Kantinenname (z.B. 'HessenTreff im HMdI')
-        target_heading = None
-        for heading in soup.find_all(["h1", "h2", "h3", "h4", "strong", "p"]):
-            if canteen.lower() in heading.get_text().lower():
-                target_heading = heading
-                break
+        pdf_url, img_url, standort_url = _extract_menu_candidates_from_soup(soup, page_url, canteen)
 
-        if not target_heading:
-            raise ValueError(f"Kantine '{canteen}' konnte auf {page_url} nicht gefunden werden.")
+        # Falls auf Übersichtsseite nichts gefunden, ggf. Standort-Unterseite prüfen
+        if not pdf_url and not img_url and _follow_standort and standort_url and standort_url != page_url:
+            return get_menu_source_url(
+                page_url=standort_url,
+                canteen=canteen,
+                prefer_pdf=prefer_pdf,
+                _follow_standort=False,
+            )
 
-        # Liste anderer Kantinen zur Grenzziehung im Dokument
-        other_canteens = [c for c in ["sevengardens", "hessentreff", "dow"] if c != canteen.lower()]
-
-        # Suche vorwärts ab target_heading bis zur nächsten Kantine
-        menu_img = None
-        curr = target_heading
-        while curr:
-            curr = curr.next_element
-            if not curr:
-                break
-            if getattr(curr, "name", None) in ["h1", "h2", "h3", "h4", "strong", "p"]:
-                t = curr.get_text().lower()
-                if any(oc in t for oc in other_canteens):
-                    break
-            if getattr(curr, "name", None) == "img":
-                src = curr.get("src", "")
-                if "Bildschirmfoto" in src or "wochenkarte" in src.lower() or "speiseplan" in src.lower():
-                    menu_img = curr
-                    break
-
-        # Fallback auf übergeordnete Container falls im direkten DOM-Fluss nichts gefunden
-        if not menu_img:
-            node = target_heading
-            for _ in range(6):
-                if not node.parent:
-                    break
-                node = node.parent
-                for fig in node.find_all("figure"):
-                    if "wochenkarte" in fig.get_text().lower():
-                        img = fig.find("img")
-                        if img:
-                            menu_img = img
-                            break
-                if menu_img:
-                    break
-
-        if not menu_img:
+        chosen = (pdf_url or img_url) if prefer_pdf else (img_url or pdf_url)
+        if not chosen:
             raise ValueError(f"Wochenkarte für '{canteen}' nicht gefunden.")
-
-        # Höchste Auflösung aus srcset wählen
-        srcset = menu_img.get("srcset")
-        if srcset:
-            parts = [p.strip().split() for p in srcset.split(",") if p.strip()]
-            return max(parts, key=lambda x: int(re.sub(r"\D", "", x[1])) if len(x) > 1 and re.sub(r"\D", "", x[1]) else 0)[0]
-        return menu_img.get("src")
+        return chosen
     else:
         # Fallback ohne requests/bs4 via urllib und Regex
         req = urllib.request.Request(page_url, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        match = re.search(r'src=["\'](https://[^"\']+Bildschirmfoto[^"\']+)["\']', html)
+        canteen_tok = re.escape(canteen.split()[0])
+        if prefer_pdf:
+            pdf_match = re.search(rf'href=["\'](https?://[^"\']*{canteen_tok}[^"\']*\.pdf)["\']', html, re.I)
+            if not pdf_match:
+                pdf_match = re.search(r'href=["\'](https?://[^"\']+\.pdf)["\']', html, re.I)
+            if pdf_match:
+                return pdf_match.group(1)
+        match = re.search(r'src=["\'](https?://[^"\']*(?:Bildschirmfoto|wochenkarte|-pdf\.)[^"\']+)["\']', html, re.I)
         if match:
             return match.group(1)
         raise RuntimeError("Wochenkarten-URL konnte nicht ermittelt werden.")
 
 
-def download_menu_image(image_url: str, output_path: str) -> str:
-    """Lädt das Bild herunter und speichert es lokal."""
+def get_menu_image_url(page_url: str = DEFAULT_URL, canteen: str = DEFAULT_CANTEEN) -> str:
+    """Findet die Bild-URL der Wochenkarte für HessenTreff (abwärtskompatibler Wrapper)."""
+    return get_menu_source_url(page_url=page_url, canteen=canteen, prefer_pdf=False)
+
+
+def download_menu_file(file_url: str, output_path: str) -> str:
+    """Lädt die Wochenkarte (PDF oder Bild) herunter und speichert sie lokal."""
     ensure_data_dirs()
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
-    req = urllib.request.Request(image_url, headers=headers)
+    req = urllib.request.Request(file_url, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp, open(output_path, "wb") as f:
         f.write(resp.read())
     return output_path
 
 
-def fetch_latest_menu_image(output_dir: str = IMAGES_DIR, canteen: str = DEFAULT_CANTEEN) -> str:
-    """Holt die aktuelle Wochenkarte und speichert sie im Cache-Ordner."""
-    url = get_menu_image_url(canteen=canteen)
+def download_menu_image(image_url: str, output_path: str) -> str:
+    """Lädt das Bild herunter und speichert es lokal (abwärtskompatibler Alias)."""
+    return download_menu_file(image_url, output_path)
+
+
+def fetch_latest_menu_source(
+    output_dir: str = IMAGES_DIR,
+    canteen: str = DEFAULT_CANTEEN,
+    prefer_pdf: bool = True,
+) -> str:
+    """Holt die aktuelle Wochenkarte (PDF bevorzugt, sonst Bild) und speichert sie im Cache-Ordner."""
+    url = get_menu_source_url(canteen=canteen, prefer_pdf=prefer_pdf)
     filename = os.path.basename(url.split("?")[0])
     target_path = os.path.join(output_dir, filename)
-    return download_menu_image(url, target_path)
+    return download_menu_file(url, target_path)
+
+
+def fetch_latest_menu_image(output_dir: str = IMAGES_DIR, canteen: str = DEFAULT_CANTEEN) -> str:
+    """Holt die aktuelle Wochenkarte als Bild und speichert sie im Cache-Ordner."""
+    return fetch_latest_menu_source(output_dir=output_dir, canteen=canteen, prefer_pdf=False)
 
 
 # ==============================================================================
@@ -646,11 +766,8 @@ def detect_grid(image: Image.Image) -> Tuple[List[int], List[int]]:
     return h_lines, v_lines
 
 
-def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, str]:
-    """Liest KW und Datumsspanne aus dem Tabellenkopf."""
-    w, _ = image.size
-    header_text = run_tesseract(image.crop((0, 0, w, h_top)), psm=6)
-
+def parse_header_info_from_text(header_text: str) -> Tuple[int, int, str, str]:
+    """Extrahiert KW, ISO-Jahr und Datumsspanne (Mo-Fr) aus einem Kopfzeilen-Text."""
     kw_match = re.search(r"KW\s*(\d+)", header_text, re.I)
     kw = int(kw_match.group(1)) if kw_match else datetime.now().isocalendar()[1]
 
@@ -679,14 +796,26 @@ def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, st
     return kw, jahr, start_date, end_date
 
 
-def detect_diet_badge(cell_crop: Image.Image) -> str:
+def parse_header_info(image: Image.Image, h_top: int) -> Tuple[int, int, str, str]:
+    """Liest KW und Datumsspanne per OCR aus dem Tabellenkopf."""
+    w, _ = image.size
+    header_text = run_tesseract(image.crop((0, 0, w, h_top)), psm=6)
+    return parse_header_info_from_text(header_text)
+
+
+def detect_diet_badge(cell_crop: Image.Image, full_cell: bool = False) -> str:
     """Erkennt runde Vegan- oder Vegetarisch-Siegel (grüne und orange Icons im modernen Speiseplan)."""
     w, h = cell_crop.size
-    if w < 60 or h < 60:
+    if w < 40 or h < 40:
         return ""
 
-    corner = cell_crop.crop((max(0, w - 85), max(0, h - 85), w, h))
-    arr = np.array(corner.convert("RGB"))
+    if full_cell:
+        region = cell_crop
+    else:
+        if w < 60 or h < 60:
+            return ""
+        region = cell_crop.crop((max(0, w - 85), max(0, h - 85), w, h))
+    arr = np.array(region.convert("RGB"))
 
     # Style 2: Grüner Kreis (Vegetarisch)
     green_mask = (arr[:, :, 0] >= 50) & (arr[:, :, 0] <= 125) & \
@@ -798,7 +927,10 @@ def clean_cell_text(raw_text: str) -> Tuple[str, str, str]:
         res = []
         for cl in cleaned_lines:
             if res and res[-1].endswith("-"):
-                res[-1] = res[-1].rstrip("-").strip() + " " + cl
+                if cl and cl[0].isupper():
+                    res[-1] = res[-1] + cl
+                else:
+                    res[-1] = res[-1].rstrip("-").strip() + " " + cl
             else:
                 res.append(cl)
         dish = " ".join(res)
@@ -860,6 +992,8 @@ def parse_menu_image(image_path: str) -> WeekMenu:
     days = {wday: DayMenu(wochentag=wday, datum=day_dates[wday], dishes=[]) for wday in weekdays_5}
 
     for r_idx, (cat_name, p_ma, p_gaeste) in enumerate(categories, start=1):
+        col0_cell = img.crop((v_lines[0] + 3, h_lines[r_idx] + 3, v_lines[1] - 3, h_lines[r_idx + 1] - 3))
+        row_diet = detect_diet_badge(col0_cell, full_cell=True) if "salat" not in cat_name.lower() else ""
         for c_idx, wday in enumerate(weekdays_5, start=1):
             cell = img.crop((v_lines[c_idx] + 3, h_lines[r_idx] + 3, v_lines[c_idx + 1] - 3, h_lines[r_idx + 1] - 3))
             raw = run_tesseract(cell, psm=6)
@@ -873,7 +1007,7 @@ def parse_menu_image(image_path: str) -> WeekMenu:
             diet = detect_diet_badge(cell)
             if not diet:
                 low = raw.lower()
-                diet = "Vegan" if "vegan" in low else ("Vegetarisch" if "vegetarisch" in low else "")
+                diet = "Vegan" if "vegan" in low else ("Vegetarisch" if "vegetarisch" in low else row_diet)
 
             # Allergene werden komplett weggelassen (Hinweis verweist auf Originalseite)
             days[wday].dishes.append(Dish(
@@ -883,6 +1017,196 @@ def parse_menu_image(image_path: str) -> WeekMenu:
             ))
 
     return WeekMenu(kw=kw, jahr=jahr, start_date=start_d, end_date=end_d, days=days)
+
+
+def _extract_visible_pdf_nodes(
+    pdf_path: str, img: Image.Image, h_lines: List[int], v_lines: List[int]
+) -> List[Tuple[str, float, float, float, float]]:
+    """Extrahiert sichtbare Textelemente aus Seite 1 des PDFs via pdftohtml -xml und filtert überdeckte Ebenen."""
+    pdftohtml_bin = find_poppler_tool("pdftohtml")
+    if not pdftohtml_bin:
+        return []
+
+    res = subprocess.run([pdftohtml_bin, "-xml", "-i", "-stdout", pdf_path], capture_output=True)
+    if res.returncode != 0 or not res.stdout:
+        return []
+
+    try:
+        root = ET.fromstring(res.stdout)
+    except ET.ParseError:
+        return []
+
+    page = root.find(".//page")
+    if page is None:
+        return []
+
+    pw = float(page.attrib.get("width", "0") or 0)
+    ph = float(page.attrib.get("height", "0") or 0)
+    if pw <= 0 or ph <= 0:
+        return []
+
+    iw, ih = img.size
+    sx, sy = iw / pw, ih / ph
+    gray_arr = np.array(img.convert("L"))
+    fonts = {
+        f.attrib["id"]: f.attrib.get("family", "").split("+")[-1].split("-")[0]
+        for f in page.findall("fontspec")
+        if "id" in f.attrib
+    }
+
+    nodes: List[Tuple[str, float, float, float, float, str, bool, float]] = []
+    for t in page.findall("text"):
+        txt = "".join(t.itertext()).strip()
+        if not txt:
+            continue
+        x0 = float(t.attrib.get("left", 0)) * sx
+        y0 = float(t.attrib.get("top", 0)) * sy
+        x1 = x0 + float(t.attrib.get("width", 0)) * sx
+        y1 = y0 + float(t.attrib.get("height", 0)) * sy
+        oob = x0 < -2 or y0 < -2 or x1 > iw + 2 or y1 > ih + 2
+        cx0, cy0 = max(0, int(x0)), max(0, int(y0))
+        cx1, cy1 = min(iw, int(x1)), min(ih, int(y1))
+        dark_ratio = float((gray_arr[cy0:cy1, cx0:cx1] < 200).mean()) if (cx1 > cx0 and cy1 > cy0) else 0.0
+        base_font = fonts.get(t.attrib.get("font", ""), "unknown")
+        nodes.append((txt, x0, y0, x1, y1, base_font, oob, dark_ratio))
+
+    if not nodes:
+        return []
+
+    # Falls eine alte überdeckte PDF-Ebene (z. B. anderes Schriftart-Layer bei Korrektur-PDFs) existiert,
+    # wählen wir die tatsächlich sichtbare Ebene anhand von Pixeldeckung und fehlenden Randabschnitten.
+    by_font: Dict[str, List[Tuple[str, float, float, float, float, str, bool, float]]] = {}
+    for nd in nodes:
+        by_font.setdefault(nd[5], []).append(nd)
+
+    if len(by_font) > 1:
+        def font_visibility_score(items):
+            in_bounds = sum(1 for it in items if not it[6])
+            oob_cnt = sum(1 for it in items if it[6])
+            zero_ink = sum(1 for it in items if it[7] < 0.01)
+            in_table = sum(
+                1 for it in items
+                if not it[6]
+                and v_lines[0] <= (it[1] + it[3]) / 2 <= v_lines[-1]
+                and h_lines[0] <= (it[2] + it[4]) / 2 <= h_lines[-1]
+            )
+            mean_dark = sum(it[7] for it in items) / max(len(items), 1)
+            return (in_table + in_bounds - oob_cnt * 5 - zero_ink * 3) + mean_dark * 20
+
+        best_font = max(by_font.keys(), key=lambda f: font_visibility_score(by_font[f]))
+        best_items = by_font[best_font]
+        # Nur wenn die beste Schriftart den kompletten Plan abdeckt, andere überlagerte Ebenen verwerfen
+        if len(best_items) >= 35 and sum(1 for it in best_items if it[7] < 0.01) == 0:
+            nodes = best_items
+
+    return [
+        (txt, x0, y0, x1, y1)
+        for (txt, x0, y0, x1, y1, _bf, oob, dark_ratio) in nodes
+        if not oob and dark_ratio >= 0.005
+    ]
+
+
+def _join_cell_nodes(cell_nodes: List[Tuple[str, float, float, float, float]]) -> str:
+    """Fügt Textfragmente einer Tabellenzelle geordnet nach Zeilen und Spalten zusammen."""
+    if not cell_nodes:
+        return ""
+    sorted_nodes = sorted(cell_nodes, key=lambda n: (n[2], n[1]))
+    lines: List[List[Tuple[float, str]]] = []
+    cur_y: Optional[float] = None
+    cur_h: float = 12.0
+    for txt, x0, y0, _x1, y1 in sorted_nodes:
+        h = max(y1 - y0, 8.0)
+        if cur_y is None or abs(y0 - cur_y) > max(cur_h, h) * 0.45:
+            lines.append([(x0, txt)])
+            cur_y = y0
+            cur_h = h
+        else:
+            lines[-1].append((x0, txt))
+    return "\n".join(" ".join(t for _x, t in sorted(ln, key=lambda p: p[0])) for ln in lines)
+
+
+def parse_menu_pdf(pdf_path: str) -> WeekMenu:
+    """Liest den Speiseplan direkt aus einer PDF-Wochenkarte (mit automatischem OCR-Fallback für Scan-PDFs)."""
+    pdftoppm_bin = find_poppler_tool("pdftoppm")
+    if not pdftoppm_bin:
+        raise FileNotFoundError("pdftoppm (poppler-utils) wurde nicht gefunden.")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_prefix = os.path.join(tmp_dir, "page")
+        res = subprocess.run(
+            [pdftoppm_bin, "-png", "-r", "150", "-f", "1", "-l", "1", pdf_path, out_prefix],
+            capture_output=True,
+        )
+        png_files = sorted(
+            os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.startswith("page") and f.endswith(".png")
+        )
+        if res.returncode != 0 or not png_files:
+            raise RuntimeError(f"PDF-Rendering fehlgeschlagen: {res.stderr.decode(errors='ignore').strip()}")
+
+        rendered_png = png_files[0]
+        img = Image.open(rendered_png)
+        h_lines, v_lines = detect_grid(img)
+        nodes = _extract_visible_pdf_nodes(pdf_path, img, h_lines, v_lines)
+
+        # Fallback auf OCR, falls PDF keine ausreichende Textebene enthält (z. B. reines Scan-PDF)
+        table_nodes = [
+            nd for nd in nodes
+            if v_lines[0] <= (nd[1] + nd[3]) / 2 <= v_lines[-1]
+            and h_lines[1] <= (nd[2] + nd[4]) / 2 <= h_lines[-1]
+        ]
+        if len(table_nodes) < 10:
+            return parse_menu_image(rendered_png)
+
+        header_nodes = [nd for nd in nodes if (nd[2] + nd[4]) / 2 <= h_lines[0] + 15]
+        header_text = _join_cell_nodes(header_nodes)
+        kw, jahr, start_d, end_d = parse_header_info_from_text(header_text)
+
+        start_dt = datetime.strptime(start_d, "%Y-%m-%d")
+        weekdays_5 = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
+        day_dates = {wday: (start_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i, wday in enumerate(weekdays_5)}
+
+        def nodes_in_box(x0: int, y0: int, x1: int, y1: int) -> List[Tuple[str, float, float, float, float]]:
+            return [
+                nd for nd in nodes
+                if x0 <= (nd[1] + nd[3]) / 2 <= x1 and y0 <= (nd[2] + nd[4]) / 2 <= y1
+            ]
+
+        days = {wday: DayMenu(wochentag=wday, datum=day_dates[wday], dishes=[]) for wday in weekdays_5}
+
+        for r_idx in range(1, len(h_lines) - 1):
+            col0_text = _join_cell_nodes(nodes_in_box(v_lines[0], h_lines[r_idx], v_lines[1], h_lines[r_idx + 1]))
+            cat_name, p_ma, p_gaeste = parse_category_cell(col0_text, row_idx=r_idx)
+            col0_cell = img.crop((v_lines[0] + 3, h_lines[r_idx] + 3, v_lines[1] - 3, h_lines[r_idx + 1] - 3))
+            row_diet = detect_diet_badge(col0_cell, full_cell=True) if "salat" not in cat_name.lower() else ""
+
+            for c_idx, wday in enumerate(weekdays_5, start=1):
+                raw = _join_cell_nodes(nodes_in_box(v_lines[c_idx], h_lines[r_idx], v_lines[c_idx + 1], h_lines[r_idx + 1]))
+                dish_text, cal, _alg = clean_cell_text(raw)
+
+                norm_dish = re.sub(r"^[\d\s,.*+-]+|[\d\s,.*+-]+$", "", dish_text).strip().lower()
+                if not norm_dish or norm_dish == "tagesgericht":
+                    continue
+
+                cell = img.crop((v_lines[c_idx] + 3, h_lines[r_idx] + 3, v_lines[c_idx + 1] - 3, h_lines[r_idx + 1] - 3))
+                diet = detect_diet_badge(cell)
+                if not diet:
+                    low = raw.lower()
+                    diet = "Vegan" if "vegan" in low else ("Vegetarisch" if "vegetarisch" in low else row_diet)
+
+                days[wday].dishes.append(Dish(
+                    kw=kw, jahr=jahr, datum=day_dates[wday], wochentag=wday,
+                    kategorie=cat_name, gericht=dish_text, preis_mitarbeiter=p_ma,
+                    preis_gaeste=p_gaeste, eigenschaften=diet, kalorien=cal, allergene=""
+                ))
+
+        return WeekMenu(kw=kw, jahr=jahr, start_date=start_d, end_date=end_d, days=days)
+
+
+def parse_menu_file(file_path: str) -> WeekMenu:
+    """Parst wahlweise eine PDF-Wochenkarte direkt oder ein Wochenkarten-Bild per OCR."""
+    if file_path.lower().endswith(".pdf"):
+        return parse_menu_pdf(file_path)
+    return parse_menu_image(file_path)
 
 
 # ==============================================================================
@@ -1599,17 +1923,26 @@ def ensure_week_menu(force_update: bool = False, offline: bool = False) -> WeekM
             return latest
         raise RuntimeError("Kein lokaler Speiseplan vorhanden und --offline aktiv.")
 
-    # 3. Vor dem Web-Download prüfen, ob Tesseract für die Bilderkennung bereitsteht
-    tess = find_tesseract_binary()
-    if not tess:
-        print_missing_tesseract_help()
-        sys.exit(1)
-
-    # 4. Bild von Website abrufen, OCR durchführen und CSVs aktualisieren
+    # 3. Aktuelle Wochenkarte von Website abrufen (PDF bevorzugt, sonst Bild + OCR)
     print(f"{CYAN}ℹ Lade aktuellen Speiseplan von {DEFAULT_URL} herunter...{RESET}", file=sys.stderr)
-    img_path = fetch_latest_menu_image()
-    print(f"{CYAN}ℹ Führe OCR-Tabellenanalyse durch...{RESET}", file=sys.stderr)
-    menu = parse_menu_image(img_path)
+    menu_path = fetch_latest_menu_source(prefer_pdf=True)
+    if menu_path.lower().endswith(".pdf"):
+        print(f"{CYAN}ℹ Extrahiere Speiseplan aus PDF ({os.path.basename(menu_path)})...{RESET}", file=sys.stderr)
+        try:
+            menu = parse_menu_file(menu_path)
+        except FileNotFoundError:
+            print(f"{YELLOW}⚠ Poppler (pdftoppm) nicht gefunden – weiche auf Bild-Vorschau + OCR aus...{RESET}", file=sys.stderr)
+            if not find_tesseract_binary():
+                print_missing_tesseract_help()
+                sys.exit(1)
+            img_path = fetch_latest_menu_image()
+            menu = parse_menu_image(img_path)
+    else:
+        if not find_tesseract_binary():
+            print_missing_tesseract_help()
+            sys.exit(1)
+        print(f"{CYAN}ℹ Führe OCR-Tabellenanalyse durch...{RESET}", file=sys.stderr)
+        menu = parse_menu_file(menu_path)
     csv_file = save_week_csv(menu)
     total = update_archive_csv(menu)
     print(f"{GREEN}✓ KW {menu.kw} gespeichert ({csv_file}, {total} Gerichte im Archiv).{RESET}\n", file=sys.stderr)

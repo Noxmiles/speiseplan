@@ -240,23 +240,35 @@ def run_sync(force: bool = False) -> int:
             log(f"ℹ Heute bereits erfolgreich für KW {cur_kw} synchronisiert. Keine Aktion erforderlich.")
             return 0
 
-    # 1. Lokales Tesseract prüfen
-    tess = sp.find_tesseract_binary()
-    if not tess:
-        log("❌ Tesseract OCR ist auf diesem PC nicht verfügbar!")
-        return 1
-
-    # 2. Bild von kaiberg-kitchen.de laden und OCR durchführen
+    # 1. Wochenkarte (PDF bevorzugt, mit Bild/OCR-Fallback) von kaiberg-kitchen.de laden und parsen
     try:
         log("📥 Lade aktuelle Wochenkarte von kaiberg-kitchen.de...")
-        img_path = sp.fetch_latest_menu_image()
-        log(f"🔍 Führe Tesseract OCR-Erkennung aus ({os.path.basename(img_path)})...")
-        menu = sp.parse_menu_image(img_path)
+        menu_path = sp.fetch_latest_menu_source(prefer_pdf=True)
+        is_pdf = menu_path.lower().endswith(".pdf")
+        if is_pdf:
+            log(f"📄 Analysiere PDF-Wochenkarte direkt ({os.path.basename(menu_path)})...")
+            try:
+                menu = sp.parse_menu_file(menu_path)
+            except FileNotFoundError:
+                log("⚠️ Poppler-Tools nicht verfügbar – weiche auf Bild-Vorschau + Tesseract OCR aus...")
+                if not sp.find_tesseract_binary():
+                    log("❌ Weder Poppler (pdftoppm) noch Tesseract OCR ist auf diesem PC verfügbar!")
+                    return 1
+                img_path = sp.fetch_latest_menu_image()
+                menu = sp.parse_menu_image(img_path)
+        else:
+            if not sp.find_tesseract_binary():
+                log("❌ Tesseract OCR ist auf diesem PC nicht verfügbar!")
+                return 1
+            log(f"🔍 Führe Tesseract OCR-Erkennung aus ({os.path.basename(menu_path)})...")
+            menu = sp.parse_menu_file(menu_path)
+
         week_csv = sp.save_week_csv(menu)
         arch_count = sp.update_archive_csv(menu)
-        log(f"✓ Lokale OCR erfolgreich: KW {menu.kw}/{menu.jahr} ({len(menu.all_dishes())} Gerichte, Archiv: {arch_count})")
+        src_mode = "PDF-Parser" if is_pdf else "OCR-Erkennung"
+        log(f"✓ {src_mode} erfolgreich: KW {menu.kw}/{menu.jahr} ({len(menu.all_dishes())} Gerichte, Archiv: {arch_count})")
     except Exception as e:
-        log(f"❌ Fehler bei OCR-Erkennung: {e}")
+        log(f"❌ Fehler beim Einlesen der Wochenkarte: {e}")
         state["last_error"] = str(e)
         state["last_attempt"] = datetime.now().isoformat()
         save_state(state)

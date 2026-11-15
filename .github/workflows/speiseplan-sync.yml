@@ -29,10 +29,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 🔍 Tesseract OCR & beste deutsche Sprachdaten (tessdata_best) installieren
+      - name: 🔍 Poppler (PDF) & Tesseract OCR (Fallback inkl. tessdata_best) installieren
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-deu
+          sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-deu
           # tessdata_best für maximale Erkennungspräzision (Float32 Modell) herunterladen
           TESSDATA_DIR=$(tesseract --list-langs 2>&1 | grep -oP '(?<=in ")[^"]+' || echo "/usr/share/tessdata")
           echo "Hauptverzeichnis tessdata: ${TESSDATA_DIR}"
@@ -49,7 +49,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: 🚀 OCR ausführen & Speiseplan live zu Hetzner beamen
+      - name: 🚀 Speiseplan auslesen (PDF / OCR-Fallback) & live zu Hetzner beamen
         env:
           SYNC_MODE: 'webhook'
           WEBHOOK_URL: 'https://kantine.alexander-ochs.dev/index.php'
