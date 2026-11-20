@@ -1645,6 +1645,14 @@ class RatingManager:
             return False
 
     @staticmethod
+    def normalize_dish_name(dish_title: str) -> str:
+        return re.sub(r"\s+", " ", (dish_title or "")).strip()
+
+    @staticmethod
+    def make_rating_key(dish_date: str, dish_title: str) -> str:
+        return f"{dish_date.strip()}|{RatingManager.normalize_dish_name(dish_title)}"
+
+    @staticmethod
     def hash_device_token(token: str, user_agent: str = "") -> str:
         s = f"{token.strip()}|{user_agent.strip()}"
         return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -1773,7 +1781,7 @@ class RatingManager:
         }
 
         self.save_data(data)
-        summary = self.get_dish_summary(dish_title, canonical, data)
+        summary = self.get_dish_summary(dish_date, dish_title, data)
         return {
             "success": True,
             "stars": stars,
@@ -1836,7 +1844,7 @@ class RatingManager:
 
         self.save_data(data)
         canonical = get_canonical_dish(dish_title)
-        summary = self.get_dish_summary(dish_title, canonical, data)
+        summary = self.get_dish_summary(dish_date, dish_title, data)
         return {
             "success": True,
             "undone": True,
@@ -1845,17 +1853,18 @@ class RatingManager:
         }
 
     def get_dish_summary(
-        self, dish_title: str, canonical: Optional[str] = None, data: Optional[Dict[str, Any]] = None
+        self, dish_date: str, dish_title: str, data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if data is None:
             data = self.load_data()
-        if canonical is None:
-            canonical = get_canonical_dish(dish_title)
+        target_date = dish_date.strip()
+        target_dish = self.normalize_dish_name(dish_title)
 
         matching_stars = [
             int(r["stars"])
             for r in data.get("ratings", [])
-            if r.get("dish_canonical") == canonical or r.get("dish_raw") == dish_title
+            if (r.get("datum") or "").strip() == target_date
+            and self.normalize_dish_name(r.get("dish_raw", "")) == target_dish
         ]
         count = len(matching_stars)
         if count == 0:
@@ -1866,24 +1875,42 @@ class RatingManager:
     def get_all_summaries(self) -> Dict[str, Dict[str, Any]]:
         data = self.load_data()
         grouped: Dict[str, List[int]] = {}
+        meta: Dict[str, Tuple[str, str]] = {}
         for r in data.get("ratings", []):
-            canon = r.get("dish_canonical") or r.get("dish_raw") or ""
-            if not canon:
+            r_date = (r.get("datum") or "").strip()
+            r_raw = self.normalize_dish_name(r.get("dish_raw") or r.get("dish_canonical") or "")
+            if not r_date or not r_raw:
                 continue
-            grouped.setdefault(canon, []).append(int(r.get("stars", 0)))
+            key = self.make_rating_key(r_date, r_raw)
+            if key not in meta:
+                meta[key] = (r_date, r_raw)
+            grouped.setdefault(key, []).append(int(r.get("stars", 0)))
 
         summaries = {}
-        for dish, stars_list in grouped.items():
+        for key, stars_list in grouped.items():
             cnt = len(stars_list)
             avg = round(sum(stars_list) / cnt, 1)
-            summaries[dish] = {"avg": avg, "count": cnt, "formatted": f"{avg:.1f}".replace(".", ",")}
+            r_date, r_raw = meta[key]
+            summaries[key] = {
+                "datum": r_date,
+                "dish": r_raw,
+                "avg": avg,
+                "count": cnt,
+                "formatted": f"{avg:.1f}".replace(".", ","),
+            }
         return summaries
 
     def get_top_rated_dishes(self, min_votes: int = 1, limit: int = 10) -> List[Dict[str, Any]]:
         summaries = self.get_all_summaries()
         filtered = [
-            {"dish": dish, "avg": info["avg"], "count": info["count"], "formatted": info["formatted"]}
-            for dish, info in summaries.items()
+            {
+                "dish": info["dish"],
+                "datum": info["datum"],
+                "avg": info["avg"],
+                "count": info["count"],
+                "formatted": info["formatted"],
+            }
+            for info in summaries.values()
             if info["count"] >= min_votes
         ]
         filtered.sort(key=lambda x: (x["avg"], x["count"]), reverse=True)
