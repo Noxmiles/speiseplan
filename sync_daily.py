@@ -43,7 +43,7 @@ OBFUSCATION_KEY = b"speiseplan-hetzner-secure-key-2026"
 DEFAULT_CONFIG = {
     "mode": "webhook",
     "webhook_url": "https://kantine.alexander-ochs.dev/index.php",
-    "sync_token": "D784AC8549AB49DE5BE2A5AEF1EC6A679577DFBDD68DCF02EA209199004C2959",
+    "sync_token": "",
     "sftp_host": "",
     "sftp_user": "",
     "sftp_remote_dir": "data"
@@ -170,6 +170,9 @@ def upload_via_sftp(local_file: str, remote_filename: str) -> bool:
 
 def upload_via_webhook(url: str, token: str, kw: int, year: int, csv_content: str, source: str = "l") -> bool:
     """Sendet die CSV-Daten per verschlüsseltem HTTPS-POST an die index.php auf Hetzner."""
+    if not token:
+        log("❌ Kein SYNC_TOKEN gesetzt (weder via Umgebungsvariable SYNC_TOKEN noch in sync_config.json).")
+        return False
     log(f"🚀 Übertrage KW {kw}/{year} per HTTPS-Webhook an {url} (Quelle: {source})...")
 
     post_data = urllib.parse.urlencode({

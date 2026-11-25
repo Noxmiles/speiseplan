@@ -53,7 +53,7 @@ jobs:
         env:
           SYNC_MODE: 'webhook'
           WEBHOOK_URL: 'https://kantine.alexander-ochs.dev/index.php'
-          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN || 'D784AC8549AB49DE5BE2A5AEF1EC6A679577DFBDD68DCF02EA209199004C2959' }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
           SYNC_SOURCE: 'g'
         run: |
           python3 sync_daily.py --force
