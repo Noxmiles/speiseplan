@@ -1,6 +1,6 @@
 # Speiseplan Scraper & CLI (HessenTreff im HMdI)
 
-Ein leicht verständliches Python-3-Projekt, das automatisch die wöchentliche Speisekarte des Betriebsrestaurants **„HessenTreff im HMdI“** von [kaiberg-kitchen.de](https://kaiberg-kitchen.de) abruft, ausliest, als saubere CSV-Dateien speichert und über Terminal oder GitHub Actions bereitstellt.
+Ein leicht verständliches Python-3-Projekt, das automatisch die wöchentliche Speisekarte des Betriebsrestaurants „HessenTreff im HMdI“ von [kaiberg-kitchen.de](https://kaiberg-kitchen.de) abruft, ausliest, als saubere CSV-Dateien speichert und über Terminal oder GitHub Actions bereitstellt.
 
 ---
 
