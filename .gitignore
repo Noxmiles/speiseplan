@@ -10,14 +10,17 @@ sync_config.json
 data/
 *.log
 
-# Server- & Testdateien (auf Hetzner bzw. lokal)
+# Server- & Live-Testdateien (privat / produktiv)
 php/
-tests/
 systemd/
+tests/test_live_suite.py
+apply_redesign.py
+design_ref/
 
-# Bild- & Paketdateien
+# Bild-, PDF- & Paketdateien
 *.png
 *.jpg
 *.jpeg
+*.pdf
 *.pkg.tar.zst
 tessdata/

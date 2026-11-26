@@ -1,3 +1,13 @@
+# ==============================================================================
+# GitHub Actions Workflow: Speiseplan automatisch abrufen & veröffentlichen
+# ==============================================================================
+# - Läuft zeitgesteuert (Mo–So) sowie manuell über "Run workflow".
+# - Installiert `poppler-utils` (direktes PDF-Auslesen) und `tesseract-ocr` +
+#   `tessdata_best` (automatischer Bild-/Scan-Fallback).
+# - Startet `sync_daily.py --force` und sendet die geparste Wochen-CSV per
+#   HTTPS-Webhook. Das benötigte Token liegt geschützt im GitHub Secret
+#   `SYNC_TOKEN` (Repository Settings -> Secrets and variables -> Actions).
+# ==============================================================================
 name: Speiseplan Auto-Sync (HessenTreff)
 
 on:

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-SPEISEPLAN TÄGLICHER SYNC & UPLOAD (SYSTEMD TIMER / CRON)
+SPEISEPLAN TÄGLICHER SYNC & UPLOAD (GITHUB ACTIONS / SYSTEMD / CRON)
 ==============================================================================
-Führt automatisch folgende Schritte aus:
- 1. Prüft, ob heute bereits für die aktuelle KW synchronisiert wurde (verhindert
-    unnötige Mehrfachläufe bei mehreren PC-Neustarts am selben Tag).
- 2. Lädt die neueste Wochenkarte von kaiberg-kitchen.de per OCR herunter.
- 3. Erstellt die lokale KW-CSV und aktualisiert das Langzeit-Archiv.
- 4. Lädt die Daten vollautomatisch zu Hetzner hoch (per sicherem SFTP oder Webhook).
+Automatisiert das Herunterladen und Hochladen des aktuellen Speiseplans.
+Nutzt die Funktionen aus `speiseplan.py` (bzw. `speiseplan_core/`):
+
+ 1. Prüft, ob heute bereits für die aktuelle KW synchronisiert wurde (außer --force).
+ 2. Lädt die neueste Wochenkarte von kaiberg-kitchen.de (PDF bevorzugt, mit OCR-Fallback).
+ 3. Speichert `data/kwXX_YYYY.csv` und aktualisiert `data/archive.csv`.
+ 4. Überträgt die Daten zum Zielserver:
+    - per HTTPS-Webhook (`SYNC_MODE=webhook` + `SYNC_TOKEN` aus GitHub Secret / Env)
+    - oder lokal per SFTP (`SYNC_MODE=sftp` mit `.sftp_credentials`, per .gitignore geschützt).
+
+Details zu Setup & Secrets: siehe README.md.
 
 Nutzung:
     python3 sync_daily.py            # Normaler täglicher Lauf (für systemd / cron)
